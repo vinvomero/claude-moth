@@ -1,0 +1,7 @@
+{
+  "poll_seconds": 20,
+  "stale_minutes": 30,
+  "window_left": 60,
+  "window_top": 60,
+  "track_width": 220
+}

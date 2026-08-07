@@ -1,0 +1,5 @@
+# runtime state — never commit
+usage-cache.json
+*.tmp
+*.bak
+*.bak-*
