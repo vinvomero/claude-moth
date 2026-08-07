@@ -48,8 +48,10 @@ click the small **×** in its top-right corner.
 | `capture-usage.ps1` | saves your latest usage whenever a Claude session is active |
 | `widget.ps1` | the floating bar itself |
 | `launch-widget.vbs` | starts the widget with no console window |
-| `config.json` | position, refresh rate, and "stale" threshold — edit if you like |
+| `config.json` | refresh rate, "stale" threshold, bar width, default position — edit if you like |
 | `usage-cache.json` | the latest saved numbers (created automatically) |
+| `window-state.json` | remembers where you dragged the widget (created automatically) |
+| `widget-error.log` | startup errors, written only if the widget fails to launch |
 
 ## Requirements
 
@@ -65,8 +67,9 @@ click the small **×** in its top-right corner.
 
 `install.ps1` makes exactly two changes and backs up your settings first:
 
-- Adds a `statusLine` entry to `~/.claude/settings.json` (your previous file is saved to
-  `settings.json.bak`). If you already had a custom status line, it warns you before replacing it.
+- Adds a `statusLine` entry to `~/.claude/settings.json` (your pre-install file is saved once to
+  `settings.json.usage-widget.bak`). If you already had a custom status line, it warns you before
+  replacing it — and uninstall leaves a status line alone if it's no longer this widget's.
 - Adds a **login auto-start**: a Startup shortcut that runs the widget **hidden**
   (`-WindowStyle Hidden`) with **`-ExecutionPolicy Bypass`**, from this folder. That's a normal
   way to run a personal script on login, but you should know it's happening — and keep this

@@ -3,31 +3,50 @@ param([string]$SelfTest, [string]$Screenshot)
 # Frameless, always-on-top desktop widget that shows real Claude Code usage
 # (5-hour + weekly) read from usage-cache.json. Native WPF via Windows PowerShell 5.1.
 # Launch hidden with:  powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File widget.ps1
-# Headless smoke test:  powershell.exe -STA -File widget.ps1 -SelfTest <path-to-sample-cache.json>
+# Dev flags (headless, no window shown):
+#   -SelfTest <cache.json> | empty   render against a sample cache (or the no-cache
+#                                    state) and print a one-line state dump
+#   -Screenshot <out.png>            render the card to a PNG (uses the live cache)
 
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 $root      = $PSScriptRoot
 $cacheFile = Join-Path $root 'usage-cache.json'
 $cfgFile   = Join-Path $root 'config.json'
+$stateFile = Join-Path $root 'window-state.json'   # per-user runtime state (gitignored)
 $logFile   = Join-Path $root 'widget-error.log'
 
 function Write-Utf8NoBom($path, $text) {
     [System.IO.File]::WriteAllText($path, $text, (New-Object System.Text.UTF8Encoding($false)))
 }
+function Write-ErrorLog($msg) {
+    try { Add-Content -Path $logFile -Value ("[{0}] {1}" -f ([DateTime]::UtcNow.ToString('u')), $msg) } catch { }
+}
 
-# ---- config ----
+# ---- config (shipped defaults; user-editable) + window state (runtime; gitignored) ----
 $defaults = @{ poll_seconds = 20; stale_minutes = 30; window_left = 60; window_top = 60; track_width = 220 }
 $cfg = @{}; foreach ($k in @($defaults.Keys)) { $cfg[$k] = $defaults[$k] }
 if (Test-Path $cfgFile) {
     try { (Get-Content $cfgFile -Raw | ConvertFrom-Json).psobject.Properties | ForEach-Object { $cfg[$_.Name] = $_.Value } } catch { }
 }
-# Coerce every numeric setting back to a number, falling back to the default if
-# the user hand-edited config.json into a non-numeric value (the README invites edits).
+# Saved window position (written on close) overrides config defaults.
+if (Test-Path $stateFile) {
+    try {
+        $st = Get-Content $stateFile -Raw | ConvertFrom-Json
+        if ($null -ne $st.window_left) { $cfg.window_left = $st.window_left }
+        if ($null -ne $st.window_top)  { $cfg.window_top  = $st.window_top }
+    } catch { }
+}
+# Coerce every numeric setting back to a real number (the README invites hand-edits),
+# then clamp the ones where a bad range breaks the widget: a 0/negative timer interval
+# is a busy loop, and a non-positive track width kills the XAML parse.
 foreach ($k in @($defaults.Keys)) {
     $n = $cfg[$k] -as [double]
-    $cfg[$k] = if ($null -eq $n) { $defaults[$k] } else { $n }
+    $cfg[$k] = if ($null -eq $n -or [double]::IsNaN($n) -or [double]::IsInfinity($n)) { $defaults[$k] } else { $n }
 }
+$cfg.poll_seconds  = [math]::Max(1, $cfg.poll_seconds)
+$cfg.stale_minutes = [math]::Max(1, $cfg.stale_minutes)
+$cfg.track_width   = [math]::Min(2000, [math]::Max(50, $cfg.track_width))
 $TRACK = [double]$cfg.track_width
 
 $xaml = @"
@@ -73,10 +92,14 @@ $xaml = @"
 </Window>
 "@
 
+# Everything from the XAML parse to the message loop runs inside one try so that
+# ANY startup fault reaches widget-error.log - the widget launches hidden, so an
+# unlogged exception would just look like "the widget never appeared".
+try {
+
 $win = [Windows.Markup.XamlReader]::Parse($xaml)
 
 $Card    = $win.FindName('Card')
-$TitleBar= $win.FindName('TitleBar')
 $CloseBtn= $win.FindName('CloseBtn')
 $Pct5    = $win.FindName('Pct5');  $Fill5 = $win.FindName('Fill5');  $Reset5 = $win.FindName('Reset5')
 $Pct7    = $win.FindName('Pct7');  $Fill7 = $win.FindName('Fill7');  $Reset7 = $win.FindName('Reset7')
@@ -147,15 +170,19 @@ $tick.Interval = [TimeSpan]::FromSeconds(1)
 $tick.Add_Tick({ if ($script:cache) { Update-Display } })
 
 # ---- interaction ----
-$TitleBar.Add_MouseLeftButtonDown({ $win.DragMove() })
-$Card.Add_MouseLeftButtonDown({ if ($_.OriginalSource -isnot [Windows.Controls.TextBlock]) { $win.DragMove() } })
-$CloseBtn.Add_MouseLeftButtonUp({ $win.Close() })
+# Close on button-DOWN and mark it handled: a DragMove started by a bubbled press
+# would swallow the mouse-up, so an Up-based close handler would never fire.
+$CloseBtn.Add_MouseLeftButtonDown({ $_.Handled = $true; $win.Close() })
+# One window-level drag handler (CloseBtn's Handled press never reaches it).
+# DragMove throws if the button was already released - ignore that.
+$win.Add_MouseLeftButtonDown({ try { $win.DragMove() } catch { } })
 
 $win.Add_Closing({
+    # Persist position to the gitignored state file - never rewrite config.json,
+    # which is a tracked file (rewriting it would dirty every user's clone).
     try {
-        $cfg.window_left = [int]$win.Left
-        $cfg.window_top  = [int]$win.Top
-        Write-Utf8NoBom $cfgFile ($cfg | ConvertTo-Json)
+        $st = [ordered]@{ window_left = [int]$win.Left; window_top = [int]$win.Top }
+        Write-Utf8NoBom $stateFile ($st | ConvertTo-Json)
     } catch { }
 })
 
@@ -190,11 +217,9 @@ $win.Add_SourceInitialized({
     $poll.Start(); $tick.Start()
 })
 
-# The widget is launched hidden (no console), so any startup fault would be
-# invisible. Log it to a file instead of failing silently.
-try {
-    [void]$win.ShowDialog()
+[void]$win.ShowDialog()
+
 } catch {
-    try { Add-Content -Path $logFile -Value ("[{0}] {1}" -f ([DateTime]::UtcNow.ToString('u')), $_.Exception.Message) } catch { }
+    Write-ErrorLog $_.Exception.Message
     throw
 }

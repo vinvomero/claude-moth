@@ -1,5 +1,7 @@
 # runtime state — never commit
 usage-cache.json
+window-state.json
+widget-error.log
 *.tmp
 *.bak
 *.bak-*

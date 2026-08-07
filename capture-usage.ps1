@@ -14,16 +14,23 @@ $cacheFile = Join-Path $PSScriptRoot 'usage-cache.json'
 function Write-Utf8NoBom($path, $text) {
     [System.IO.File]::WriteAllText($path, $text, (New-Object System.Text.UTF8Encoding($false)))
 }
-# Parse a percentage into [0,100], or $null if not a real number.
+# Parse a percentage into [0,100], or $null if not a real finite number.
+# InvariantCulture is required: JSON is always dot-decimal, but plain TryParse uses
+# the OS locale - on comma-decimal locales (de-DE etc.) it reads "42.3" as 423.
 function ConvertTo-Pct($v) {
     $d = 0.0
-    if ([double]::TryParse([string]$v, [ref]$d)) { return [math]::Max(0.0, [math]::Min(100.0, $d)) }
+    if ([double]::TryParse([string]$v, [System.Globalization.NumberStyles]::Float,
+            [System.Globalization.CultureInfo]::InvariantCulture, [ref]$d)) {
+        if ([double]::IsNaN($d) -or [double]::IsInfinity($d)) { return $null }
+        return [math]::Max(0.0, [math]::Min(100.0, $d))
+    }
     return $null
 }
 # Parse an epoch-seconds value, or $null if not a real integer.
 function ConvertTo-Epoch($v) {
     $l = [long]0
-    if ([long]::TryParse([string]$v, [ref]$l)) { return $l }
+    if ([long]::TryParse([string]$v, [System.Globalization.NumberStyles]::Integer,
+            [System.Globalization.CultureInfo]::InvariantCulture, [ref]$l)) { return $l }
     return $null
 }
 
@@ -59,10 +66,13 @@ if ($null -ne $p5 -and $null -ne $r5 -and $null -ne $p7 -and $null -ne $r7) {
     $json = $obj | ConvertTo-Json -Depth 5
     if ($json -and $json.Trim().Length -gt 2) {
         $tmp = "$cacheFile.tmp"
-        # Atomic + BOM-less: temp file, then replace, so the widget never
-        # reads a half-written file and downstream JSON parsers stay happy.
+        # Atomic + BOM-less: temp file, then File.Replace (a true atomic swap -
+        # Move-Item -Force is delete-then-move, leaving a gap a reader can hit).
+        # [NullString]::Value, not $null: PowerShell turns $null into "" for .NET
+        # string parameters, and Replace rejects "" as an illegal path.
         Write-Utf8NoBom $tmp $json
-        Move-Item -Path $tmp -Destination $cacheFile -Force
+        if (Test-Path $cacheFile) { [System.IO.File]::Replace($tmp, $cacheFile, [NullString]::Value) }
+        else { Move-Item -Path $tmp -Destination $cacheFile -Force }
     }
     $parts += ("5h {0}%  wk {1}%" -f [math]::Round($p5), [math]::Round($p7))
 }
