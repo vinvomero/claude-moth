@@ -7,6 +7,10 @@
 $ErrorActionPreference = 'SilentlyContinue'
 $settings = Join-Path $env:USERPROFILE '.claude\settings.json'
 
+function Write-Utf8NoBom($path, $text) {
+    [System.IO.File]::WriteAllText($path, $text, (New-Object System.Text.UTF8Encoding($false)))
+}
+
 # 1. Close running widget (any powershell hosting widget.ps1)
 Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" |
     Where-Object { $_.CommandLine -like '*widget.ps1*' } |
@@ -22,7 +26,7 @@ if (Test-Path $settings) {
         $cfg = Get-Content $settings -Raw | ConvertFrom-Json
         if ($cfg.PSObject.Properties.Name -contains 'statusLine') {
             $cfg.PSObject.Properties.Remove('statusLine')
-            $cfg | ConvertTo-Json -Depth 100 | Set-Content -Path $settings -Encoding UTF8
+            Write-Utf8NoBom $settings ($cfg | ConvertTo-Json -Depth 100)
             Write-Host "  [ok] status line entry removed; settings.json still valid" -ForegroundColor Green
         }
     } catch { Write-Host "  [skip] could not edit settings.json" -ForegroundColor Yellow }

@@ -10,11 +10,23 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 $root      = $PSScriptRoot
 $cacheFile = Join-Path $root 'usage-cache.json'
 $cfgFile   = Join-Path $root 'config.json'
+$logFile   = Join-Path $root 'widget-error.log'
+
+function Write-Utf8NoBom($path, $text) {
+    [System.IO.File]::WriteAllText($path, $text, (New-Object System.Text.UTF8Encoding($false)))
+}
 
 # ---- config ----
-$cfg = @{ poll_seconds = 20; stale_minutes = 30; window_left = 60; window_top = 60; track_width = 220 }
+$defaults = @{ poll_seconds = 20; stale_minutes = 30; window_left = 60; window_top = 60; track_width = 220 }
+$cfg = @{}; foreach ($k in @($defaults.Keys)) { $cfg[$k] = $defaults[$k] }
 if (Test-Path $cfgFile) {
     try { (Get-Content $cfgFile -Raw | ConvertFrom-Json).psobject.Properties | ForEach-Object { $cfg[$_.Name] = $_.Value } } catch { }
+}
+# Coerce every numeric setting back to a number, falling back to the default if
+# the user hand-edited config.json into a non-numeric value (the README invites edits).
+foreach ($k in @($defaults.Keys)) {
+    $n = $cfg[$k] -as [double]
+    $cfg[$k] = if ($null -eq $n) { $defaults[$k] } else { $n }
 }
 $TRACK = [double]$cfg.track_width
 
@@ -109,12 +121,12 @@ function Update-Display {
     $stale  = $ageMin -ge [int]$cfg.stale_minutes
     $dim    = if ($stale) { 0.45 } else { 1.0 }
 
-    $p5 = [double]$c.five_hour.used_percentage
-    $p7 = [double]$c.seven_day.used_percentage
+    $p5 = [math]::Max(0, [math]::Min(100, ([double]$c.five_hour.used_percentage)))
+    $p7 = [math]::Max(0, [math]::Min(100, ([double]$c.seven_day.used_percentage)))
     $Pct5.Text = ('{0}%' -f [math]::Round($p5))
     $Pct7.Text = ('{0}%' -f [math]::Round($p7))
-    $Fill5.Width = [math]::Max(0, [math]::Min(100, $p5)) / 100 * $TRACK
-    $Fill7.Width = [math]::Max(0, [math]::Min(100, $p7)) / 100 * $TRACK
+    $Fill5.Width = $p5 / 100 * $TRACK
+    $Fill7.Width = $p7 / 100 * $TRACK
     $Fill5.Background = [Windows.Media.BrushConverter]::new().ConvertFromString((Get-BarColor $p5))
     $Fill7.Background = [Windows.Media.BrushConverter]::new().ConvertFromString((Get-BarColor $p7))
     $Reset5.Text = Format-Remaining ([long]$c.five_hour.resets_at)
@@ -143,7 +155,7 @@ $win.Add_Closing({
     try {
         $cfg.window_left = [int]$win.Left
         $cfg.window_top  = [int]$win.Top
-        ($cfg | ConvertTo-Json) | Set-Content -Path $cfgFile -Encoding UTF8
+        Write-Utf8NoBom $cfgFile ($cfg | ConvertTo-Json)
     } catch { }
 })
 
@@ -178,4 +190,11 @@ $win.Add_SourceInitialized({
     $poll.Start(); $tick.Start()
 })
 
-[void]$win.ShowDialog()
+# The widget is launched hidden (no console), so any startup fault would be
+# invisible. Log it to a file instead of failing silently.
+try {
+    [void]$win.ShowDialog()
+} catch {
+    try { Add-Content -Path $logFile -Value ("[{0}] {1}" -f ([DateTime]::UtcNow.ToString('u')), $_.Exception.Message) } catch { }
+    throw
+}

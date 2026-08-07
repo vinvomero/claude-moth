@@ -51,11 +51,30 @@ click the small **×** in its top-right corner.
 | `config.json` | position, refresh rate, and "stale" threshold — edit if you like |
 | `usage-cache.json` | the latest saved numbers (created automatically) |
 
-## Note
+## Requirements
 
-This relies on Claude Code **2.1.80 or newer** (that version is when the official
-status-line usage feed shipped). Check with `claude --version`; upgrade with
-`winget upgrade Anthropic.ClaudeCode` or `claude update`.
+- **Claude Code 2.1.80 or newer** — that version is when the official status-line usage
+  feed shipped. Check with `claude --version`; upgrade with `winget upgrade Anthropic.ClaudeCode`
+  or `claude update`.
+- **Windows PowerShell 5.1** (the built-in `powershell.exe`, present on every Windows 10/11).
+  The widget uses WPF, which needs the Desktop edition's single-threaded apartment; the
+  launcher calls `powershell.exe` explicitly for this reason. If the widget ever fails to
+  appear, check `widget-error.log` in this folder.
 
-It does **not** touch your login token or call any private endpoints — it only reads
-the usage numbers Claude Code already shows you. Everything stays on your machine.
+## What install does (full disclosure)
+
+`install.ps1` makes exactly two changes and backs up your settings first:
+
+- Adds a `statusLine` entry to `~/.claude/settings.json` (your previous file is saved to
+  `settings.json.bak`). If you already had a custom status line, it warns you before replacing it.
+- Adds a **login auto-start**: a Startup shortcut that runs the widget **hidden**
+  (`-WindowStyle Hidden`) with **`-ExecutionPolicy Bypass`**, from this folder. That's a normal
+  way to run a personal script on login, but you should know it's happening — and keep this
+  folder somewhere only you can write to, so nobody can swap `widget.ps1` out from under it.
+
+`uninstall.ps1` reverses both cleanly.
+
+## Privacy
+
+It does **not** touch your login token or call any private endpoints — it only reads the usage
+numbers Claude Code already shows you. Everything stays on your machine.
