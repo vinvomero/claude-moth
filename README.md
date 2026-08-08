@@ -161,6 +161,14 @@ except to Anthropic, sends the `User-Agent` the endpoint expects, backs off poli
 and degrades to the status-line feed if the endpoint fails. If any of that makes you
 uncomfortable, leave it off — the default mode is fully within documented behavior.
 
+**Token nudge (part of live sync):** the stored login token expires every ~8 hours, and a
+long-running Claude app refreshes it in memory *without* writing the file — which would
+freeze live sync mid-session. When Moth sees the token has expired, it wakes a minimal
+headless Claude Code process (`claude -p "ok"` on Haiku — one tiny request, at most a few
+times a day) so **Claude itself** refreshes and rewrites its token the official way. Moth
+never touches the token lifecycle directly. Set `"token_nudge": false` in `config.json` to
+disable; Moth will then just show "open a Claude session to re-sync" when it happens.
+
 ```text
        *
 

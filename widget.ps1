@@ -293,7 +293,12 @@ function Update-Display {
 
     # Card is ALWAYS fully opaque - staleness lives in the bars + label, never opacity.
     $Card.Opacity = 1.0
-    if ($script:epAuthHint -and $stale) {
+    if ($script:epExpired -and $stale) {
+        # Expired token is NOT a login problem - the user IS logged in; the file just
+        # aged out. Say what's actually happening (nudge in flight) or what actually
+        # fixes it (any fresh Claude session rewrites the file).
+        $Updated.Text = if ($script:epNudgeOk) { 'refreshing sync...' } else { 'open a Claude session to re-sync' }
+    } elseif ($script:epAuthHint -and $stale) {
         # Only surface the login hint when the missing token is ACTUALLY causing
         # staleness. If the statusLine feed is keeping the bars fresh, live_sync's
         # absent token is irrelevant - don't nag a logged-in user to "log in", and
@@ -349,15 +354,53 @@ function ConvertTo-Epoch($v) {
     return $null
 }
 
+function Invoke-TokenNudge {
+    # The login token in .credentials.json expires every ~8h, and a LONG-RUNNING Claude
+    # app refreshes it in memory without writing the file back - so the file (our only
+    # token source) goes permanently stale mid-session. Verified fix: a FRESH Claude
+    # Code process refreshes the token via its own official path and writes the file.
+    # So: wake a minimal headless `claude -p` (one tiny Haiku request, disclosed in the
+    # README, disable with "token_nudge": false). Throttled to once per 15 min.
+    # We deliberately do NOT call the OAuth refresh endpoint ourselves - Claude Code
+    # owns the token lifecycle; Moth just gives it a reason to run.
+    if ($cfg.token_nudge -eq $false) { return $false }
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    if ($script:lastNudge -and (($now - $script:lastNudge) -lt 900)) { return $true }
+    $cli = Get-Command claude -ErrorAction SilentlyContinue
+    if (-not $cli) { return $false }
+    $script:lastNudge = $now
+    try {
+        Start-Process -WindowStyle Hidden -FilePath $cli.Source -ArgumentList '-p','ok','--model','claude-haiku-4-5'
+        Write-ErrorLog "live_sync: login token expired; woke a minimal Claude Code process to refresh it (token nudge)."
+        return $true
+    } catch { return $false }
+}
+
 function Invoke-EndpointPoll {
     try {
         $credFile = Join-Path $env:USERPROFILE '.claude\.credentials.json'
-        $token = $null
-        if (Test-Path $credFile) { $token = (Get-Content $credFile -Raw | ConvertFrom-Json).claudeAiOauth.accessToken }
-        if (-not $token) {
-            # Token can be TRANSIENTLY absent (Claude Code rewrites the file on refresh;
-            # observed empty-then-repopulated the same evening). NEVER stop polling -
-            # show the login hint, back off, and recover automatically when it returns.
+        $token = $null; $expMs = $null
+        if (Test-Path $credFile) {
+            $oauth = (Get-Content $credFile -Raw | ConvertFrom-Json).claudeAiOauth
+            $token = $oauth.accessToken
+            $expMs = $oauth.expiresAt -as [long]
+        }
+        # Expired-token check BEFORE burning a doomed request: expiresAt is epoch ms.
+        $expired = $false
+        if ($token -and $expMs -and ($expMs -lt ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() + 60000))) { $expired = $true }
+        if (-not $token -or $expired) {
+            if ($expired) {
+                # Not a login problem - the file's token aged out while the app holds a
+                # fresh one in memory. Nudge Claude Code to rewrite the file, then retry
+                # SOON (fixed short interval, not the doubling backoff - the nudge
+                # usually lands within seconds).
+                $script:epNudgeOk = Invoke-TokenNudge
+                $script:epExpired = $true
+                $ep.Interval = [TimeSpan]::FromSeconds(45)
+                return
+            }
+            # Token entirely absent: can be TRANSIENT (Claude Code rewrites the file on
+            # refresh). NEVER stop polling - hint, back off, recover automatically.
             if (-not $script:epNoTokenLogged) {
                 Write-ErrorLog "live_sync: no login token in .credentials.json yet - will keep checking (backoff). Log in to Claude Code if this persists."
                 $script:epNoTokenLogged = $true
@@ -377,6 +420,7 @@ function Invoke-EndpointPoll {
         $script:epBackoff = $EP_BASE_SECONDS   # success resets backoff...
         $ep.Interval = [TimeSpan]::FromSeconds($EP_BASE_SECONDS)  # ...and the LIVE timer, not just the variable - else one blip pins polling at up to 30 min forever
         $script:epAuthHint = $false
+        $script:epExpired = $false
 
         $p5 = ConvertTo-PctScale $resp.five_hour.utilization
         $r5 = ConvertTo-Epoch    $resp.five_hour.resets_at
@@ -419,7 +463,15 @@ function Invoke-EndpointPoll {
     } catch {
         $code = 0
         try { $code = [int]$_.Exception.Response.StatusCode } catch { }
-        if ($code -eq 401) { $script:epAuthHint = $true }
+        if ($code -eq 401) {
+            # 401 with a token that LOOKED valid = the file is stale anyway (e.g. clock
+            # skew, or expiresAt lied). Same cure: nudge Claude Code to rewrite it.
+            $script:epExpired = $true
+            $script:epNudgeOk = Invoke-TokenNudge
+            Write-ErrorLog ("endpoint poll failed: HTTP 401 - token stale; nudged={0}" -f $script:epNudgeOk)
+            $ep.Interval = [TimeSpan]::FromSeconds(45)
+            return
+        }
         # diagnostic only - status + exception text, never the token or response body
         Write-ErrorLog ("endpoint poll failed: HTTP {0} - {1}" -f $code, $_.Exception.Message)
         # back off on any failure (429, network, schema change): double up to 30 min
