@@ -105,6 +105,9 @@ try {
         Where-Object { $_.CommandLine -like $mine } |
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 } catch { }
+# Let the old process fully tear down so it releases the single-instance mutex before
+# the new widget tries to acquire it (otherwise the fresh instance would exit as a dup).
+Start-Sleep -Milliseconds 700
 Start-Process 'wscript.exe' -ArgumentList ('"' + $vbs + '"')
 Write-Host "  [ok] widget started" -ForegroundColor Green
 
