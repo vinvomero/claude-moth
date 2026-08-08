@@ -72,7 +72,7 @@ $tmpl = Join-Path $root 'commands\moth.md.tmpl'
 if (Test-Path $tmpl) {
     $cmdsDir = Join-Path $env:USERPROFILE '.claude\commands'
     New-Item -ItemType Directory -Force -Path $cmdsDir | Out-Null
-    $mothMd = (Get-Content $tmpl -Raw).Replace('__RESTART_PATH__', (Join-Path $root 'restart-widget.ps1')).Replace('__ROOT__', $root)
+    $mothMd = (Get-Content $tmpl -Raw -Encoding UTF8).Replace('__RESTART_PATH__', (Join-Path $root 'restart-widget.ps1')).Replace('__ROOT__', $root)
     Write-Utf8NoBom (Join-Path $cmdsDir 'moth.md') $mothMd
     Write-Host "  [ok] /moth restart command installed" -ForegroundColor Green
 }

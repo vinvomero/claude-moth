@@ -382,7 +382,9 @@ if ($SelfTest -or $Screenshot) {
         $fs = [IO.File]::Create($Screenshot); $enc.Save($fs); $fs.Close()
         Write-Output "SCREENSHOT saved: $Screenshot ($w x $h)"
     }
-    return
+    # Force-exit: WPF spins up non-background threads during render, so a plain `return`
+    # leaves the process alive (an orphan). These are headless dev modes - kill it outright.
+    [Environment]::Exit(0)
 }
 
 # ---- single-instance guard ----
