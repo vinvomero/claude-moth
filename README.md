@@ -130,6 +130,11 @@ Optionally (only with `-AutoStart`): a Startup shortcut that runs the widget **h
 way to run a personal script on login, but you should know it's happening — and keep this
 folder somewhere only you can write to, so nobody can swap `widget.ps1` out from under it.
 
+> **Run install from a normal (non-admin) PowerShell.** If you install from an
+> elevated "Run as administrator" window, the widget runs elevated too — and Claude
+> Code (running normally) then can't see it to refresh or restart it, so `/moth` and
+> auto-relaunch stop working. A normal window is the right way to run a personal script.
+
 `uninstall.ps1` reverses all of it cleanly.
 
 ## Privacy

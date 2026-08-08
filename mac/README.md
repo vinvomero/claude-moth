@@ -27,6 +27,12 @@ The `5m` in the filename means it refreshes every 5 minutes.
 **Requirements:** `python3` (present on any Mac with the Xcode Command Line Tools or
 Homebrew — `xcode-select --install` if you don't have it). No other dependencies.
 
+**First run — a Keychain prompt:** macOS may ask whether `security` (the tool this
+plugin uses to read your login token) can access the "Claude Code-credentials" key.
+Click **Always Allow** so it stops asking. If you click Deny, Moth falls back to
+`~/.claude/.credentials.json`; if that isn't present either, it just shows "Not logged
+in" until you allow it.
+
 ## What the colors mean
 
 Same as the Windows widget: **amber** normally, **orange** past 70%, **red** past 90% —

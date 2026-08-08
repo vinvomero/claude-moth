@@ -101,8 +101,11 @@ if ($AutoStart) {
 #        widget.ps1 (full-path match) so unrelated scripts named widget.ps1 are safe. ---
 try {
     $mine = '*' + [System.Management.Automation.WildcardPattern]::Escape((Join-Path $root 'widget.ps1')) + '*'
+    # Stop only REAL launches (`-File ...\widget.ps1`); never a headless dev run or the
+    # -Command wrapper that merely references the path.
     Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" |
-        Where-Object { $_.CommandLine -like $mine } |
+        Where-Object { $_.CommandLine -like $mine -and $_.CommandLine -like '*-File*' -and
+            $_.CommandLine -notlike '*-SelfTest*' -and $_.CommandLine -notlike '*-Screenshot*' -and $_.CommandLine -notlike '*-Command*' } |
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 } catch { }
 # Let the old process fully tear down so it releases the single-instance mutex before

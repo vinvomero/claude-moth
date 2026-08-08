@@ -61,6 +61,13 @@ except Exception:
 if not token:
     bail("Moth", "Logged in, but no access token yet. Open Claude Code, then refresh.")
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    # Never follow a 3xx: a redirect would resend the Authorization: Bearer header to
+    # whatever host the response points at. Returning None turns any redirect into an
+    # HTTPError we handle below, so the token only ever goes to api.anthropic.com.
+    def redirect_request(self, *args, **kwargs):
+        return None
+
 try:
     req = urllib.request.Request(
         "https://api.anthropic.com/api/oauth/usage",
@@ -71,7 +78,8 @@ try:
             "User-Agent": "claude-code/2.1.224",
         },
     )
-    with urllib.request.urlopen(req, timeout=15) as r:
+    opener = urllib.request.build_opener(_NoRedirect)
+    with opener.open(req, timeout=15) as r:
         data = json.load(r)
 except Exception as e:
     code = getattr(e, "code", None)
@@ -80,14 +88,18 @@ except Exception as e:
     bail("Moth", f"Couldn't reach the usage endpoint ({code or 'network error'}).")
 
 def pct(bucket):
-    u = data.get(bucket, {}).get("utilization")
+    # `data.get(bucket, {})` does NOT protect against "five_hour": null (the default
+    # applies only to a MISSING key, not a null value) - `or {}` covers both.
+    u = (data.get(bucket) or {}).get("utilization")
     if u is None:
         return None
-    u = float(u)
-    return u * 100 if u <= 1.0 else u  # accept 0-1 or 0-100
+    try:
+        return max(0.0, min(100.0, float(u)))  # endpoint is 0-100; no 0-1 rescale
+    except (TypeError, ValueError):
+        return None
 
 def resets(bucket):
-    v = data.get(bucket, {}).get("resets_at")
+    v = (data.get(bucket) or {}).get("resets_at")
     if v is None:
         return None
     try:
@@ -120,34 +132,44 @@ def color_for(p):
     if p >= 70: return ORANGE
     return AMBER
 
-p5, p7 = pct("five_hour"), pct("seven_day")
-r5, r7 = resets("five_hour"), resets("seven_day")
+# Everything below renders the menu. Any unexpected shape (a field that changed type,
+# a bucket that became null) must degrade to a clean "couldn't render" state, never a
+# raw traceback in the menu bar. bail() raises SystemExit (not Exception), so it still
+# exits cleanly from inside this guard.
+try:
+    p5, p7 = pct("five_hour"), pct("seven_day")
+    r5, r7 = resets("five_hour"), resets("seven_day")
 
-# Menu-bar title: the actionable 5-hour number, colored by pressure.
-if p5 is None:
-    line("Moth", color=MUTED)
-else:
-    line(f"{round(p5)}%", color=color_for(p5))
+    # Menu-bar title: the actionable 5-hour number, colored by pressure.
+    if p5 is None:
+        line("Moth", color=MUTED)
+    else:
+        line(f"{round(p5)}%", color=color_for(p5))
 
-print("---")
-line("Moth - Claude usage", color=DIM)
-print("---")
-if p5 is not None:
-    line(f"5-hour   {round(p5)}%", color=color_for(p5))
-    if r5: line(remaining(r5), color=DIM, size="11")
-if p7 is not None:
-    line(f"Weekly   {round(p7)}%", color=color_for(p7))
-    if r7: line(remaining(r7), color=DIM, size="11")
+    print("---")
+    line("Moth - Claude usage", color=DIM)
+    print("---")
+    if p5 is not None:
+        line(f"5-hour   {round(p5)}%", color=color_for(p5))
+        if r5: line(remaining(r5), color=DIM, size="11")
+    if p7 is not None:
+        line(f"Weekly   {round(p7)}%", color=color_for(p7))
+        if r7: line(remaining(r7), color=DIM, size="11")
 
-# Optional per-model weekly bucket, shown when present.
-for key in ("seven_day_opus", "seven_day_sonnet", "seven_day_fable"):
-    b = data.get(key)
-    if b and b.get("utilization") is not None:
-        pm = pct(key)
-        label = key.replace("seven_day_", "").capitalize()
-        line(f"{label} (weekly)   {round(pm)}%", color=color_for(pm))
-        break
+    # Optional per-model weekly bucket, shown when present. Same preference order as
+    # the Windows widget so both platforms surface the same bucket.
+    for key in ("seven_day_fable", "seven_day_opus", "seven_day_sonnet"):
+        b = data.get(key)
+        if b and b.get("utilization") is not None:
+            pm = pct(key)
+            if pm is None:
+                continue
+            label = key.replace("seven_day_", "").capitalize()
+            line(f"{label} (weekly)   {round(pm)}%", color=color_for(pm))
+            break
 
-print("---")
-line("Refresh", refresh="true")
+    print("---")
+    line("Refresh", refresh="true")
+except Exception as e:
+    bail("Moth", f"Couldn't render usage ({type(e).__name__}).")
 PYEOF

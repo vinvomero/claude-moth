@@ -92,14 +92,21 @@ if ($null -ne $p5 -and $null -ne $r5 -and $null -ne $p7 -and $null -ne $r7) {
     $obj.captured_at = [long][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     $json = $obj | ConvertTo-Json -Depth 5
     if ($json -and $json.Trim().Length -gt 2) {
-        $tmp = "$cacheFile.tmp"
+        $tmp = "$cacheFile.$PID.tmp"
         # Atomic + BOM-less: temp file, then File.Replace (a true atomic swap -
         # Move-Item -Force is delete-then-move, leaving a gap a reader can hit).
         # [NullString]::Value, not $null: PowerShell turns $null into "" for .NET
         # string parameters, and Replace rejects "" as an illegal path.
-        Write-Utf8NoBom $tmp $json
-        if (Test-Path $cacheFile) { [System.IO.File]::Replace($tmp, $cacheFile, [NullString]::Value) }
-        else { Move-Item -Path $tmp -Destination $cacheFile -Force }
+        # Per-writer temp name ($PID): the widget's endpoint poll writes the same cache,
+        # and a shared "$cacheFile.tmp" could collide mid-swap. The whole swap is wrapped
+        # because .NET File.Replace throws a TERMINATING exception that
+        # $ErrorActionPreference='SilentlyContinue' does not catch - unguarded, a rare
+        # collision would kill this script before it finished the status line.
+        try {
+            Write-Utf8NoBom $tmp $json
+            if (Test-Path $cacheFile) { [System.IO.File]::Replace($tmp, $cacheFile, [NullString]::Value) }
+            else { Move-Item -Path $tmp -Destination $cacheFile -Force }
+        } catch { try { Remove-Item $tmp -Force -ErrorAction SilentlyContinue } catch { } }
     }
     $parts += ("5h {0}%  wk {1}%" -f [math]::Round($p5), [math]::Round($p7))
 }
@@ -119,8 +126,11 @@ if ($parts.Count -eq 0) { $parts += 'Claude' }
 try {
     $vbs  = Join-Path $PSScriptRoot 'launch-widget.vbs'
     $mine = '*' + [System.Management.Automation.WildcardPattern]::Escape((Join-Path $PSScriptRoot 'widget.ps1')) + '*'
+    # Match only REAL launches (`-File ...\widget.ps1`); exclude the headless dev modes
+    # and the -Command wrapper so a -SelfTest run is never counted as "already running".
     $running = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -like $mine })
+        Where-Object { $_.CommandLine -like $mine -and $_.CommandLine -like '*-File*' -and
+            $_.CommandLine -notlike '*-SelfTest*' -and $_.CommandLine -notlike '*-Screenshot*' -and $_.CommandLine -notlike '*-Command*' })
     if ($running.Count -eq 0 -and (Test-Path $vbs)) {
         Start-Process 'wscript.exe' -ArgumentList ('"' + $vbs + '"')
         Write-Breadcrumb 'LAUNCH widget not running -> started launcher'

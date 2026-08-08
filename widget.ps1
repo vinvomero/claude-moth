@@ -44,7 +44,9 @@ if (Test-Path $stateFile) {
 # Opt-in live sync via the oauth/usage endpoint (undocumented; see README). This is
 # the PRIMARY data source for desktop-app users, who get no statusLine feed. Accept
 # either config key: live_sync (current) or fable_bar (legacy).
-$LIVE_SYNC_ON = ($cfg.live_sync -eq $true) -or ($cfg.fable_bar -eq $true)
+# live_sync wins whenever it is set at all - so an explicit `live_sync: false` overrides
+# a stale legacy `fable_bar: true`. Fall back to the old key only when live_sync is absent.
+$LIVE_SYNC_ON = if ($null -ne $cfg.live_sync) { $cfg.live_sync -eq $true } else { $cfg.fable_bar -eq $true }
 # Coerce every numeric setting back to a real number (the README invites hand-edits),
 # then clamp the ones where a bad range breaks the widget: a 0/negative timer interval
 # is a busy loop, and a non-positive track width kills the XAML parse.
@@ -177,9 +179,30 @@ function Format-Remaining([long]$resetAt) {
 
 $script:cache = $null
 
+function Test-Numeric($x) {
+    # PS 5.1 gotcha: `$null -as [double]` is 0, not $null - so guard null/blank FIRST.
+    if ($null -eq $x) { return $false }
+    if ($x -is [string] -and [string]::IsNullOrWhiteSpace($x)) { return $false }
+    $d = $x -as [double]
+    return (($null -ne $d) -and (-not [double]::IsNaN($d)))
+}
+
 function Read-Cache {
     if (-not (Test-Path $cacheFile)) { return $null }
-    try { return (Get-Content $cacheFile -Raw | ConvertFrom-Json) } catch { return $null }
+    try { $c = Get-Content $cacheFile -Raw | ConvertFrom-Json } catch { return $null }
+    # Shape-guard the cache. It is normally written by our own code, but the README
+    # invites hand-edits and a malformed cache must degrade to "waiting for data",
+    # never crash the widget (a thrown [long] cast on ISO/garbage would kill the
+    # dialog and the statusLine ensure-check would relaunch it into the same crash).
+    # Require both core buckets with numeric percent + epoch resets_at, and a numeric
+    # captured_at (writers always convert ISO to epoch before storing).
+    foreach ($b in 'five_hour','seven_day') {
+        if (-not $c.$b) { return $null }
+        if (-not (Test-Numeric $c.$b.used_percentage)) { return $null }
+        if (-not (Test-Numeric $c.$b.resets_at)) { return $null }
+    }
+    if (-not (Test-Numeric $c.captured_at)) { return $null }
+    return $c
 }
 
 $script:lastSavedPos = $null
@@ -259,7 +282,12 @@ function Update-Display {
 
     # Card is ALWAYS fully opaque - staleness lives in the bars + label, never opacity.
     $Card.Opacity = 1.0
-    if ($script:epAuthHint) {
+    if ($script:epAuthHint -and $stale) {
+        # Only surface the login hint when the missing token is ACTUALLY causing
+        # staleness. If the statusLine feed is keeping the bars fresh, live_sync's
+        # absent token is irrelevant - don't nag a logged-in user to "log in", and
+        # don't let a hint that can never clear (token in protected storage) shadow
+        # good data forever.
         $Updated.Text = 'log in to Claude Code to sync'
     } elseif ($stale) {
         $Updated.Text = if ($ageMin -ge 60) { ('last synced {0}h ago' -f [math]::Floor($ageMin/60)) } else { ('last synced {0}m ago' -f $ageMin) }
@@ -287,10 +315,14 @@ $EP_BASE_SECONDS = 180
 $script:epBackoff = $EP_BASE_SECONDS
 
 function ConvertTo-PctScale($v) {
-    # Endpoint utilization may be 0-1 fraction or 0-100 percent; normalize to 0-100.
+    # The endpoint reports utilization on a 0-100 scale (verified live: 79.0, 24.0).
+    # Guard null/empty FIRST: in PS 5.1 `$null -as [double]` is 0, NOT $null - so a
+    # `utilization: null` payload would coerce to a fresh, wrong 0% and silently
+    # overwrite good data. Return $null instead so the write-guard skips it. (The Mac
+    # plugin guards this same case.) No 0-1 rescale: it would turn a real 1% into 100%.
+    if ($null -eq $v -or ($v -is [string] -and [string]::IsNullOrWhiteSpace($v))) { return $null }
     $d = $v -as [double]
     if ($null -eq $d -or [double]::IsNaN($d)) { return $null }
-    if ($d -le 1.0) { $d = $d * 100 }
     return [math]::Max(0.0, [math]::Min(100.0, $d))
 }
 function ConvertTo-Epoch($v) {
@@ -331,7 +363,8 @@ function Invoke-EndpointPoll {
             'anthropic-beta' = 'oauth-2025-04-20'
             'User-Agent'     = 'claude-code/2.1.224'
         }
-        $script:epBackoff = $EP_BASE_SECONDS   # success resets backoff
+        $script:epBackoff = $EP_BASE_SECONDS   # success resets backoff...
+        $ep.Interval = [TimeSpan]::FromSeconds($EP_BASE_SECONDS)  # ...and the LIVE timer, not just the variable - else one blip pins polling at up to 30 min forever
         $script:epAuthHint = $false
 
         $p5 = ConvertTo-PctScale $resp.five_hour.utilization
@@ -364,7 +397,7 @@ function Invoke-EndpointPoll {
             }
             $obj.captured_at = [long][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
             $json = [pscustomobject]$obj | ConvertTo-Json -Depth 5
-            $tmp = "$cacheFile.tmp"
+            $tmp = "$cacheFile.$PID.tmp"   # per-writer name so it never collides with the statusLine capture's temp
             Write-Utf8NoBom $tmp $json
             if (Test-Path $cacheFile) { [System.IO.File]::Replace($tmp, $cacheFile, [NullString]::Value) }
             else { Move-Item -Path $tmp -Destination $cacheFile -Force }

@@ -11,11 +11,18 @@ $root = $PSScriptRoot
 $vbs  = Join-Path $root 'launch-widget.vbs'
 # Strict full-path match, identical to install.ps1, so we never touch a stranger's widget.ps1.
 $mine = '*' + [System.Management.Automation.WildcardPattern]::Escape((Join-Path $root 'widget.ps1')) + '*'
+# Count only REAL launches: `-File ...\widget.ps1`. Exclude the headless dev modes
+# (-SelfTest/-Screenshot) and the interactive -Command wrapper, which merely reference
+# the path - otherwise /moth could kill a screenshot render mid-write, or report OK on
+# a lingering selftest.
+$isWidget = { $_.CommandLine -like $mine -and $_.CommandLine -like '*-File*' -and
+    $_.CommandLine -notlike '*-SelfTest*' -and $_.CommandLine -notlike '*-Screenshot*' -and
+    $_.CommandLine -notlike '*-Command*' }
 
 # 1. Stop any instance running THIS folder's widget.ps1.
 $stopped = 0
 Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" |
-    Where-Object { $_.CommandLine -like $mine } |
+    Where-Object $isWidget |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force; $stopped++ }
 
 # 2. Let the OS tear the old process down and release the single-instance mutex
@@ -28,7 +35,7 @@ Start-Process 'wscript.exe' -ArgumentList ('"' + $vbs + '"')
 # 4. Confirm the new instance came up and report.
 Start-Sleep -Milliseconds 1300
 $now = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
-    Where-Object { $_.CommandLine -like $mine })
+    Where-Object $isWidget)
 if ($now.Count -ge 1) {
     $pids = ($now | ForEach-Object { $_.ProcessId }) -join ', '
     "OK: Moth restarted (stopped $stopped, now running PID $pids)."

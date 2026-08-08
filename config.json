@@ -4,5 +4,5 @@
   "window_left": 60,
   "window_top": 60,
   "track_width": 220,
-  "fable_bar": false
+  "live_sync": false
 }

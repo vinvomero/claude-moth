@@ -14,10 +14,13 @@ function Write-Utf8NoBom($path, $text) {
     [System.IO.File]::WriteAllText($path, $text, (New-Object System.Text.UTF8Encoding($false)))
 }
 
-# 1. Close a running widget - full-path match so unrelated widget.ps1 scripts are safe
+# 1. Close a running widget - full-path match so unrelated widget.ps1 scripts are safe.
+# Match only REAL launches (`-File ...\widget.ps1`); never a headless dev run or the
+# -Command wrapper that merely references the path.
 $mine = '*' + [System.Management.Automation.WildcardPattern]::Escape((Join-Path $root 'widget.ps1')) + '*'
 Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" |
-    Where-Object { $_.CommandLine -like $mine } |
+    Where-Object { $_.CommandLine -like $mine -and $_.CommandLine -like '*-File*' -and
+        $_.CommandLine -notlike '*-SelfTest*' -and $_.CommandLine -notlike '*-Screenshot*' -and $_.CommandLine -notlike '*-Command*' } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
 
 # 2. Remove Startup shortcut
@@ -34,10 +37,25 @@ if (Test-Path $settings) {
         $cfg = Get-Content $settings -Raw | ConvertFrom-Json
         if ($cfg -and ($cfg.PSObject.Properties.Name -contains 'statusLine')) {
             if ($cfg.statusLine.command -like '*capture-usage.ps1*') {
-                Copy-Item $settings $backup -Force
-                $cfg.PSObject.Properties.Remove('statusLine')
+                # If install replaced a status line the user already had, restore that
+                # ONE property from the pristine pre-install backup - do NOT overwrite
+                # the backup (it is the only pristine copy) and do NOT wipe unrelated
+                # settings the user has added since installing.
+                $priorSl = $null
+                if (Test-Path $backup) {
+                    try {
+                        $pre = Get-Content $backup -Raw | ConvertFrom-Json
+                        if ($pre.PSObject.Properties.Name -contains 'statusLine') { $priorSl = $pre.statusLine }
+                    } catch { }
+                }
+                if ($priorSl -and ($priorSl.command -notlike '*capture-usage.ps1*')) {
+                    $cfg.statusLine = $priorSl
+                    Write-Host "  [ok] restored your pre-install status line" -ForegroundColor Green
+                } else {
+                    $cfg.PSObject.Properties.Remove('statusLine')
+                    Write-Host "  [ok] status line entry removed; settings.json still valid" -ForegroundColor Green
+                }
                 Write-Utf8NoBom $settings ($cfg | ConvertTo-Json -Depth 100)
-                Write-Host "  [ok] status line entry removed; settings.json still valid" -ForegroundColor Green
             } else {
                 Write-Host "  [skip] statusLine now belongs to something else - leaving it alone" -ForegroundColor Yellow
             }
