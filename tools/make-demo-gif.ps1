@@ -89,12 +89,12 @@ $frames = @()
 $steps = 22
 for ($i = 0; $i -lt $steps; $i++) {
     $t = $i / ($steps - 1)
-    $frames += @{ p5 = (6 + $t*89); p7 = (19 + $t*8); mins5 = [int](283 - $t*235); delay = 7 }
+    $frames += @{ p5 = (6 + $t*89); p7 = (19 + $t*8); mins5 = [int](283 - $t*235); delay = 16 }
 }
-$frames += @{ p5 = 96; p7 = 27; mins5 = 44; delay = 45 }   # peak hold (red)
-$frames += @{ p5 = 96; p7 = 27; mins5 = 43; delay = 50 }
-$frames += @{ p5 = 5;  p7 = 27; mins5 = 299; delay = 32 }   # the 5-hour window resets
-$frames += @{ p5 = 5;  p7 = 27; mins5 = 299; delay = 32 }
+$frames += @{ p5 = 96; p7 = 27; mins5 = 44; delay = 90 }    # peak hold (red)
+$frames += @{ p5 = 96; p7 = 27; mins5 = 43; delay = 90 }
+$frames += @{ p5 = 5;  p7 = 27; mins5 = 299; delay = 70 }   # the 5-hour window resets
+$frames += @{ p5 = 5;  p7 = 27; mins5 = 299; delay = 70 }
 
 # Lock a fixed frame size (measure the widest state once) so every GIF frame matches.
 function Set-State($f) {
