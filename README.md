@@ -1,4 +1,4 @@
-# Moth
+# /moth
 
 <p align="center">
   <img src="assets/moth-demo.gif" alt="Moth — a desktop widget showing Claude Code 5-hour and weekly usage, glowing warm amber then orange then red as usage climbs" width="306">
