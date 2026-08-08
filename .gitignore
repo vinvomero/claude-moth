@@ -2,6 +2,7 @@
 usage-cache.json
 window-state.json
 widget-error.log
+capture-debug.log
 *.tmp
 *.bak
 *.bak-*

@@ -24,6 +24,10 @@ Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" |
 $lnk = Join-Path ([Environment]::GetFolderPath('Startup')) 'Claude Usage Widget.lnk'
 if (Test-Path $lnk) { Remove-Item $lnk -Force; Write-Host "  [ok] auto-start removed" -ForegroundColor Green }
 
+# 2b. Remove the /moth slash command
+$mothCmd = Join-Path $env:USERPROFILE '.claude\commands\moth.md'
+if (Test-Path $mothCmd) { Remove-Item $mothCmd -Force; Write-Host "  [ok] /moth command removed" -ForegroundColor Green }
+
 # 3. Strip OUR statusLine from settings.json (leave a foreign one alone)
 if (Test-Path $settings) {
     try {

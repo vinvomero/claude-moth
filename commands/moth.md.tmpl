@@ -1,0 +1,14 @@
+---
+description: Restart the Moth desktop usage widget
+allowed-tools: Bash(powershell.exe:*)
+---
+
+Restart the **Moth** desktop usage widget — the always-on-top card that shows Claude Code usage.
+
+Run exactly this with the Bash tool:
+
+```
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "__RESTART_PATH__"
+```
+
+The script prints a single line starting with `OK:` or `ERROR:`. Relay it to me in one short sentence — confirm Moth is back up (with its PID), or, if it errored, tell me to check `__ROOT__\widget-error.log`. Do nothing else.

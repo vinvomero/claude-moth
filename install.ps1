@@ -4,6 +4,10 @@
 #   2. Adds a Startup shortcut so the widget launches (hidden) on every login.
 #   3. Starts the widget now (replacing any instance already running from this folder).
 # Run:  powershell.exe -ExecutionPolicy Bypass -File install.ps1
+#   Pass -AutoStart to also create a Windows login shortcut (OFF by default; the widget
+#   is meant to launch from Claude sessions, not Windows startup).
+
+param([switch]$AutoStart)
 
 $ErrorActionPreference = 'Stop'
 $root       = $PSScriptRoot
@@ -48,7 +52,7 @@ if (($cfg.PSObject.Properties.Name -contains 'statusLine') -and
     Write-Host "         $backup" -ForegroundColor DarkGray
 }
 
-$sl = [pscustomobject]@{ type = 'command'; command = $cmd; padding = 0 }
+$sl = [pscustomobject]@{ type = 'command'; command = $cmd; padding = 0; refreshInterval = 15 }
 if ($cfg.PSObject.Properties.Name -contains 'statusLine') { $cfg.statusLine = $sl }
 else { $cfg | Add-Member -NotePropertyName statusLine -NotePropertyValue $sl }
 Write-Utf8NoBom $settings ($cfg | ConvertTo-Json -Depth 100)
@@ -63,18 +67,35 @@ try {
     Write-Host "  [ok] status line registered; settings.json is valid JSON" -ForegroundColor Green
 } catch { throw "settings.json became invalid - restore from $backup. $_" }
 
-# --- 2. Startup shortcut -> the hidden VBS launcher (idempotent) ---
+# --- 1b. Install the /moth slash command (restarts the widget from any session) ---
+$tmpl = Join-Path $root 'commands\moth.md.tmpl'
+if (Test-Path $tmpl) {
+    $cmdsDir = Join-Path $env:USERPROFILE '.claude\commands'
+    New-Item -ItemType Directory -Force -Path $cmdsDir | Out-Null
+    $mothMd = (Get-Content $tmpl -Raw).Replace('__RESTART_PATH__', (Join-Path $root 'restart-widget.ps1')).Replace('__ROOT__', $root)
+    Write-Utf8NoBom (Join-Path $cmdsDir 'moth.md') $mothMd
+    Write-Host "  [ok] /moth restart command installed" -ForegroundColor Green
+}
+
+# --- 2. Startup shortcut -> hidden VBS launcher. OPT-IN, default OFF: the widget is
+#        meant to launch from Claude sessions (see below), not Windows login. Pass
+#        -AutoStart to create it; without it, remove any shortcut a prior install left. ---
 $startup = [Environment]::GetFolderPath('Startup')
 $lnk     = Join-Path $startup 'Claude Usage Widget.lnk'
-$ws = New-Object -ComObject WScript.Shell
-$sc = $ws.CreateShortcut($lnk)
-$sc.TargetPath  = 'wscript.exe'
-$sc.Arguments   = '"' + $vbs + '"'
-$sc.WorkingDirectory = $root
-$sc.WindowStyle = 7
-$sc.Description  = 'Claude usage widget'
-$sc.Save()
-Write-Host "  [ok] auto-start on login enabled" -ForegroundColor Green
+if ($AutoStart) {
+    $ws = New-Object -ComObject WScript.Shell
+    $sc = $ws.CreateShortcut($lnk)
+    $sc.TargetPath  = 'wscript.exe'
+    $sc.Arguments   = '"' + $vbs + '"'
+    $sc.WorkingDirectory = $root
+    $sc.WindowStyle = 7
+    $sc.Description  = 'Moth usage widget'
+    $sc.Save()
+    Write-Host "  [ok] auto-start on login ENABLED (-AutoStart)" -ForegroundColor Green
+} else {
+    if (Test-Path $lnk) { Remove-Item $lnk -Force -ErrorAction SilentlyContinue }
+    Write-Host "  [ok] auto-start on login OFF (launches from Claude sessions; pass -AutoStart to enable)" -ForegroundColor Green
+}
 
 # --- 3. (Re)start it now, hidden. Stop only an instance running THIS folder's
 #        widget.ps1 (full-path match) so unrelated scripts named widget.ps1 are safe. ---

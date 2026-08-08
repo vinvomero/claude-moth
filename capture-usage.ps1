@@ -11,6 +11,25 @@ $ErrorActionPreference = 'SilentlyContinue'
 $raw = [Console]::In.ReadToEnd()
 $cacheFile = Join-Path $PSScriptRoot 'usage-cache.json'
 
+# --- DIAGNOSTIC BREADCRUMB (U1) ---------------------------------------------
+# Gated debug flag, OFF by default. Flip to $true to diagnose capture invocation:
+# it appends two lines per run to capture-debug.log ("IN" on entry with stdin length,
+# "OUT" with parsed rate_limits) so you can tell apart never-invoked / dies-mid-script /
+# full-run, and whether the payload carried rate_limits. Confirmed working 2026-08-07.
+$DebugBreadcrumb = $false
+$breadcrumbFile = Join-Path $PSScriptRoot 'capture-debug.log'
+function Write-Breadcrumb($msg) {
+    if (-not $DebugBreadcrumb) { return }
+    try {
+        $ts = [DateTimeOffset]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ',
+            [System.Globalization.CultureInfo]::InvariantCulture)
+        [System.IO.File]::AppendAllText($breadcrumbFile, "[$ts] $msg`r`n",
+            (New-Object System.Text.UTF8Encoding($false)))
+    } catch { }
+}
+Write-Breadcrumb ("IN  invoked; stdin length={0}" -f ($(if ($null -eq $raw) { -1 } else { $raw.Length })))
+# ----------------------------------------------------------------------------
+
 function Write-Utf8NoBom($path, $text) {
     [System.IO.File]::WriteAllText($path, $text, (New-Object System.Text.UTF8Encoding($false)))
 }
@@ -85,5 +104,25 @@ if ($null -ne $p5 -and $null -ne $r5 -and $null -ne $p7 -and $null -ne $r7) {
     $parts += ("5h {0}%  wk {1}%" -f [math]::Round($p5), [math]::Round($p7))
 }
 
+Write-Breadcrumb ("OUT rate_limits={0} p5={1} r5={2} p7={3} r7={4}" -f `
+    ($(if ($rl) { 'yes' } else { 'no' })), $p5, $r5, $p7, $r7)
+
 if ($parts.Count -eq 0) { $parts += 'Claude' }
 [Console]::Out.Write(($parts -join '  |  '))
+
+# --- ensure the Moth widget is running (U3) ---------------------------------
+# Runs LAST, after the status line is already written to stdout, so a slow process
+# query never delays the render or (worse) kills this process before the cache write.
+# Strict full-path match (same as install.ps1) so an unrelated widget.ps1 is safe.
+# In terminal sessions this launches the widget the moment Claude first renders; in
+# the desktop app the status line isn't invoked at all, so this simply never runs.
+try {
+    $vbs  = Join-Path $PSScriptRoot 'launch-widget.vbs'
+    $mine = '*' + [System.Management.Automation.WildcardPattern]::Escape((Join-Path $PSScriptRoot 'widget.ps1')) + '*'
+    $running = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -like $mine })
+    if ($running.Count -eq 0 -and (Test-Path $vbs)) {
+        Start-Process 'wscript.exe' -ArgumentList ('"' + $vbs + '"')
+        Write-Breadcrumb 'LAUNCH widget not running -> started launcher'
+    }
+} catch { }

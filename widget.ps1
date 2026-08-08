@@ -58,12 +58,12 @@ $xaml = @"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         WindowStyle="None" AllowsTransparency="True" Background="Transparent"
         Topmost="True" ResizeMode="NoResize" ShowInTaskbar="False"
-        SizeToContent="WidthAndHeight" Title="Claude Usage">
+        SizeToContent="WidthAndHeight" Title="Moth">
   <Border x:Name="Card" CornerRadius="14" Background="#FA10141E" Padding="16,12,16,12">
     <Border.Effect><DropShadowEffect BlurRadius="18" ShadowDepth="0" Opacity="0.5" Color="#000000"/></Border.Effect>
     <StackPanel>
       <Grid x:Name="TitleBar" Margin="0,0,0,10">
-        <TextBlock Text="Claude usage" Foreground="#AFC2D8" FontFamily="Segoe UI" FontSize="12" FontWeight="SemiBold"
+        <TextBlock Text="Moth" Foreground="#AFC2D8" FontFamily="Segoe UI" FontSize="12" FontWeight="SemiBold"
                    HorizontalAlignment="Left" VerticalAlignment="Center"/>
         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
           <TextBlock x:Name="MinBtn" Text="&#8211;" Foreground="#6A7B92" FontFamily="Segoe UI" FontSize="16"
@@ -81,7 +81,13 @@ $xaml = @"
       <Border Width="$TRACK" Height="8" CornerRadius="4" Background="#26344E" HorizontalAlignment="Left" Margin="0,0,0,2">
         <Border x:Name="Fill5" Width="0" Height="8" CornerRadius="4" Background="#4CC2FF" HorizontalAlignment="Left"/>
       </Border>
-      <TextBlock x:Name="Reset5" Text="" Foreground="#8C9CB3" FontFamily="Segoe UI" FontSize="11" Margin="0,0,0,10"/>
+      <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+        <TextBlock x:Name="Hourglass5" Text="&#x231B;" Foreground="#8C9CB3" FontFamily="Segoe UI Symbol" FontSize="11"
+                   Margin="0,0,4,0" VerticalAlignment="Center" Visibility="Collapsed" RenderTransformOrigin="0.5,0.5">
+          <TextBlock.RenderTransform><RotateTransform x:Name="Hourglass5Rot" Angle="0"/></TextBlock.RenderTransform>
+        </TextBlock>
+        <TextBlock x:Name="Reset5" Text="" Foreground="#8C9CB3" FontFamily="Segoe UI" FontSize="11" VerticalAlignment="Center"/>
+      </StackPanel>
 
       <!-- Weekly -->
       <Grid Margin="0,0,0,2">
@@ -105,7 +111,7 @@ $xaml = @"
         <TextBlock x:Name="ResetF" Text="" Foreground="#8C9CB3" FontFamily="Segoe UI" FontSize="11" Margin="0,0,0,8"/>
       </StackPanel>
 
-      <TextBlock x:Name="Updated" Text="waiting for first Claude session..." Foreground="#6A7B92"
+      <TextBlock x:Name="Updated" Text="waiting for Claude usage data..." Foreground="#6A7B92"
                  FontFamily="Segoe UI" FontSize="11" HorizontalAlignment="Left"/>
     </StackPanel>
   </Border>
@@ -123,6 +129,7 @@ $Card    = $win.FindName('Card')
 $CloseBtn= $win.FindName('CloseBtn')
 $MinBtn  = $win.FindName('MinBtn')
 $Pct5    = $win.FindName('Pct5');  $Fill5 = $win.FindName('Fill5');  $Reset5 = $win.FindName('Reset5')
+$Hourglass5 = $win.FindName('Hourglass5'); $Hourglass5Rot = $win.FindName('Hourglass5Rot')
 $Pct7    = $win.FindName('Pct7');  $Fill7 = $win.FindName('Fill7');  $Reset7 = $win.FindName('Reset7')
 $FableGroup = $win.FindName('FableGroup'); $FableLabel = $win.FindName('FableLabel')
 $PctF    = $win.FindName('PctF');  $FillF = $win.FindName('FillF');  $ResetF = $win.FindName('ResetF')
@@ -156,10 +163,32 @@ function Read-Cache {
     try { return (Get-Content $cacheFile -Raw | ConvertFrom-Json) } catch { return $null }
 }
 
+$script:lastSavedPos = $null
+function Save-WindowState {
+    # Persist position to the gitignored state file - never rewrite config.json (tracked).
+    # Runs on the poll tick AND on close, so a forceful /moth restart (which bypasses the
+    # Closing handler) still reloads the most recent position, not a stale one.
+    # Only writes when the position actually changed and the window is in Normal state
+    # (a minimized window reports a bogus off-screen position we must not persist).
+    try {
+        if ($null -eq $win -or $win.WindowState -ne [Windows.WindowState]::Normal) { return }
+        $key = '{0},{1}' -f [int]$win.Left, [int]$win.Top
+        if ($key -eq $script:lastSavedPos) { return }
+        $st = @{}
+        if (Test-Path $stateFile) {
+            try { (Get-Content $stateFile -Raw | ConvertFrom-Json).psobject.Properties | ForEach-Object { $st[$_.Name] = $_.Value } } catch { }
+        }
+        $st.window_left = [int]$win.Left
+        $st.window_top  = [int]$win.Top
+        Write-Utf8NoBom $stateFile ([pscustomobject]$st | ConvertTo-Json)
+        $script:lastSavedPos = $key
+    } catch { }
+}
+
 function Update-Display {
     $c = $script:cache
     if (-not $c) {
-        $Updated.Text = 'waiting for first Claude session...'
+        $Updated.Text = 'waiting for Claude usage data...'
         return
     }
     $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
@@ -177,6 +206,14 @@ function Update-Display {
     $Fill7.Background = [Windows.Media.BrushConverter]::new().ConvertFromString((Get-BarColor $p7))
     $Reset5.Text = Format-Remaining ([long]$c.five_hour.resets_at)
     $Reset7.Text = Format-Remaining ([long]$c.seven_day.resets_at)
+
+    # Hourglass: rotate 0deg -> 180deg across the 5-hour window (18000s), recomputed on
+    # every 1s tick so it turns continuously. Hidden until real data exists (the no-cache
+    # branch above returns early); the card's stale-dim opacity dims it with everything else.
+    $secsLeft5 = [long]$c.five_hour.resets_at - $now
+    $frac5 = [math]::Max(0.0, [math]::Min(1.0, 1.0 - ([double]$secsLeft5 / 18000.0)))
+    $Hourglass5Rot.Angle = 180.0 * $frac5
+    $Hourglass5.Visibility = [Windows.Visibility]::Visible
 
     # Per-model weekly bar - rendered only when the cache carries a fable bucket
     if ($c.fable -and $null -ne $c.fable.used_percentage) {
@@ -199,7 +236,7 @@ function Update-Display {
 # ---- timers ----
 $poll = New-Object Windows.Threading.DispatcherTimer
 $poll.Interval = [TimeSpan]::FromSeconds([double]$cfg.poll_seconds)
-$poll.Add_Tick({ $script:cache = Read-Cache; Update-Display })
+$poll.Add_Tick({ $script:cache = Read-Cache; Update-Display; Save-WindowState })
 
 $tick = New-Object Windows.Threading.DispatcherTimer
 $tick.Interval = [TimeSpan]::FromSeconds(1)
@@ -308,20 +345,7 @@ $CloseBtn.Add_MouseLeftButtonDown({ $_.Handled = $true; $win.Close() })
 # DragMove throws if the button was already released - ignore that.
 $win.Add_MouseLeftButtonDown({ try { $win.DragMove() } catch { } })
 
-$win.Add_Closing({
-    # Persist position to the gitignored state file - never rewrite config.json,
-    # which is a tracked file (rewriting it would dirty every user's clone).
-    # Merge into the existing state so other per-user keys (fable_bar) survive.
-    try {
-        $st = @{}
-        if (Test-Path $stateFile) {
-            try { (Get-Content $stateFile -Raw | ConvertFrom-Json).psobject.Properties | ForEach-Object { $st[$_.Name] = $_.Value } } catch { }
-        }
-        $st.window_left = [int]$win.Left
-        $st.window_top  = [int]$win.Top
-        Write-Utf8NoBom $stateFile ([pscustomobject]$st | ConvertTo-Json)
-    } catch { }
-})
+$win.Add_Closing({ Save-WindowState })
 
 # ---- minimize / restore ----
 # The window is normally taskbar-less (ShowInTaskbar=False); a minimized window with
@@ -358,6 +382,19 @@ if ($SelfTest -or $Screenshot) {
         $fs = [IO.File]::Create($Screenshot); $enc.Save($fs); $fs.Close()
         Write-Output "SCREENSHOT saved: $Screenshot ($w x $h)"
     }
+    return
+}
+
+# ---- single-instance guard ----
+# The SessionStart hook and the statusLine ensure-check can both fire a launch within
+# the same moment at cold start; the launch chain takes long enough that both see zero
+# running widgets and both spawn, stacking two windows. First instance creates+owns the
+# named mutex; a second sees createdNew=$false and exits quietly. (Headless -SelfTest /
+# -Screenshot runs returned above and never reach here, so they don't contend.)
+$script:mutexNew = $false
+$script:mothMutex = New-Object System.Threading.Mutex($true, 'Global\MothWidget', [ref]$script:mutexNew)
+if (-not $script:mutexNew) {
+    Write-ErrorLog "another Moth instance already holds the single-instance mutex; this launch exits."
     return
 }
 

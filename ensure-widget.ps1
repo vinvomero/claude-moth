@@ -6,8 +6,12 @@
 # excludes this script's own process: this file's name ALSO ends in "widget.ps1",
 # so a looser match would see itself and always skip the launch.
 $root = $PSScriptRoot
+# Strict full-path match (same pattern as install.ps1 and restart-widget.ps1): match
+# only THIS folder's widget.ps1, never an unrelated script that happens to be named
+# widget.ps1. The old loose regex ('-File.*\widget.ps1') matched any of them.
+$mine = '*' + [System.Management.Automation.WildcardPattern]::Escape((Join-Path $root 'widget.ps1')) + '*'
 $running = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
-    Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -match '-File.*\\widget\.ps1' })
+    Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -like $mine })
 if ($running.Count -eq 0) {
     Start-Process 'wscript.exe' -ArgumentList ('"' + (Join-Path $root 'launch-widget.vbs') + '"')
 }
