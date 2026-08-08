@@ -87,7 +87,9 @@ powershell -ExecutionPolicy Bypass -File uninstall.ps1
 
 This closes the widget, removes the `/moth` command, removes any login auto-start,
 and removes its status-line entry from your Claude settings. Everything else is left
-untouched. To hide it just for now, click the small **×** in its top-right corner.
+untouched. To hide it just for now, click the small **×** in its top-right corner — it
+stays hidden for the rest of this session and returns the next time a Claude session
+starts (or right away if you type **`/moth`**).
 
 ## Files
 

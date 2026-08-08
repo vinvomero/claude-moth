@@ -31,16 +31,20 @@ if (Test-Path $lnk) { Remove-Item $lnk -Force; Write-Host "  [ok] auto-start rem
 $mothCmd = Join-Path $env:USERPROFILE '.claude\commands\moth.md'
 if (Test-Path $mothCmd) { Remove-Item $mothCmd -Force; Write-Host "  [ok] /moth command removed" -ForegroundColor Green }
 
-# 3. Strip OUR statusLine from settings.json (leave a foreign one alone)
+# 2c. Remove any user-hide marker so a fresh reinstall starts clean.
+Remove-Item (Join-Path $root 'widget-hidden.flag') -Force -ErrorAction SilentlyContinue
+
+# 3. Strip OUR statusLine and SessionStart hook from settings.json (leave foreign ones
+#    alone), then write once.
 if (Test-Path $settings) {
     try {
         $cfg = Get-Content $settings -Raw | ConvertFrom-Json
+        $changed = $false
+
+        # 3a. statusLine - restore the user's pre-install one if install replaced it,
+        #     else remove ours. Never overwrite the pristine backup, never wipe unrelated keys.
         if ($cfg -and ($cfg.PSObject.Properties.Name -contains 'statusLine')) {
             if ($cfg.statusLine.command -like '*capture-usage.ps1*') {
-                # If install replaced a status line the user already had, restore that
-                # ONE property from the pristine pre-install backup - do NOT overwrite
-                # the backup (it is the only pristine copy) and do NOT wipe unrelated
-                # settings the user has added since installing.
                 $priorSl = $null
                 if (Test-Path $backup) {
                     try {
@@ -55,11 +59,27 @@ if (Test-Path $settings) {
                     $cfg.PSObject.Properties.Remove('statusLine')
                     Write-Host "  [ok] status line entry removed; settings.json still valid" -ForegroundColor Green
                 }
-                Write-Utf8NoBom $settings ($cfg | ConvertTo-Json -Depth 100)
+                $changed = $true
             } else {
                 Write-Host "  [skip] statusLine now belongs to something else - leaving it alone" -ForegroundColor Yellow
             }
         }
+
+        # 3b. SessionStart hook - drop only OUR entry (the one calling ensure-widget.ps1),
+        #     keep every other hook the user has. Collapse empty containers.
+        if ($cfg -and $cfg.hooks -and $cfg.hooks.SessionStart) {
+            $kept = @($cfg.hooks.SessionStart | Where-Object {
+                -not (@($_.hooks) | Where-Object { $_.command -like '*ensure-widget.ps1*' })
+            })
+            if ($kept.Count -ne @($cfg.hooks.SessionStart).Count) {
+                if ($kept.Count) { $cfg.hooks.SessionStart = $kept }
+                else { $cfg.hooks.PSObject.Properties.Remove('SessionStart') }
+                Write-Host "  [ok] SessionStart hook removed" -ForegroundColor Green
+                $changed = $true
+            }
+        }
+
+        if ($changed) { Write-Utf8NoBom $settings ($cfg | ConvertTo-Json -Depth 100) }
     } catch { Write-Host "  [skip] could not edit settings.json" -ForegroundColor Yellow }
 }
 Write-Host "`nUninstalled. The project folder is still here if you want to reinstall later." -ForegroundColor Cyan

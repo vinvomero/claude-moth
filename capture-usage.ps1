@@ -131,7 +131,10 @@ try {
     $running = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
         Where-Object { $_.CommandLine -like $mine -and $_.CommandLine -like '*-File*' -and
             $_.CommandLine -notlike '*-SelfTest*' -and $_.CommandLine -notlike '*-Screenshot*' -and $_.CommandLine -notlike '*-Command*' })
-    if ($running.Count -eq 0 -and (Test-Path $vbs)) {
+    # Respect a user-close within the session: don't relaunch while the hidden marker
+    # exists (a new session's SessionStart hook, or /moth, clears it and brings Moth back).
+    $hidden = Join-Path $PSScriptRoot 'widget-hidden.flag'
+    if ($running.Count -eq 0 -and (Test-Path $vbs) -and -not (Test-Path $hidden)) {
         Start-Process 'wscript.exe' -ArgumentList ('"' + $vbs + '"')
         Write-Breadcrumb 'LAUNCH widget not running -> started launcher'
     }

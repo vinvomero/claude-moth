@@ -6,6 +6,9 @@
 # excludes this script's own process: this file's name ALSO ends in "widget.ps1",
 # so a looser match would see itself and always skip the launch.
 $root = $PSScriptRoot
+# A fresh Claude session clears any "user hid it" marker: closing the widget hides it
+# for the current session, but it returns the next time a session starts.
+Remove-Item (Join-Path $root 'widget-hidden.flag') -Force -ErrorAction SilentlyContinue
 # Strict full-path match (same pattern as install.ps1 and restart-widget.ps1): match
 # only THIS folder's widget.ps1, never an unrelated script that happens to be named
 # widget.ps1. The old loose regex ('-File.*\widget.ps1') matched any of them.

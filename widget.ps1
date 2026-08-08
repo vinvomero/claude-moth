@@ -15,6 +15,9 @@ $cacheFile = Join-Path $root 'usage-cache.json'
 $cfgFile   = Join-Path $root 'config.json'
 $stateFile = Join-Path $root 'window-state.json'   # per-user runtime state (gitignored)
 $logFile   = Join-Path $root 'widget-error.log'
+$hiddenFlag = Join-Path $root 'widget-hidden.flag' # written when the user clicks x, so
+                                                   # mid-session relaunch respects the close;
+                                                   # a new session (or /moth) clears it.
 
 function Write-Utf8NoBom($path, $text) {
     [System.IO.File]::WriteAllText($path, $text, (New-Object System.Text.UTF8Encoding($false)))
@@ -268,11 +271,19 @@ function Update-Display {
     $Hourglass5.Foreground = [Windows.Media.BrushConverter]::new().ConvertFromString($(if ($stale) { $STALE_BAR } else { '#B08D53' }))
     $Hourglass5.Visibility = [Windows.Visibility]::Visible
 
-    # Per-model weekly bar - rendered only when the cache carries a fable bucket
+    # Per-model weekly bar - rendered only when the cache carries a fable bucket.
+    # This bucket has its OWN timestamp: the statusLine capture carries it forward
+    # unchanged while refreshing the top-level captured_at, so it can go stale on its
+    # own. Grey it when it does, so a frozen value is never shown in full amber.
     if ($c.fable -and $null -ne $c.fable.used_percentage) {
         $pf = [math]::Max(0, [math]::Min(100, ([double]$c.fable.used_percentage)))
+        $fableStale = $stale
+        if (Test-Numeric $c.fable.captured_at) {
+            $fableStale = ([math]::Floor(($now - [long]$c.fable.captured_at) / 60)) -ge [int]$cfg.stale_minutes
+        }
         $PctF.Text = ('{0}%' -f [math]::Round($pf))
         $FillF.Width = $pf / 100 * $TRACK
+        $FillF.Background = [Windows.Media.BrushConverter]::new().ConvertFromString($(if ($fableStale) { $STALE_BAR } else { '#E8A34C' }))
         if ($c.fable.label) { $FableLabel.Text = ('{0} (weekly)' -f $c.fable.label) }
         if ($c.fable.resets_at) { $ResetF.Text = Format-Remaining ([long]$c.fable.resets_at) }
         $FableGroup.Visibility = [Windows.Visibility]::Visible
@@ -392,6 +403,7 @@ function Invoke-EndpointPoll {
                         used_percentage = $pm
                         resets_at       = ConvertTo-Epoch $resp.$modelKey.resets_at
                         label           = $label
+                        captured_at     = [long][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
                     }
                 }
             }
@@ -423,12 +435,17 @@ $ep.Add_Tick({ Invoke-EndpointPoll })
 # ---- interaction ----
 # Close on button-DOWN and mark it handled: a DragMove started by a bubbled press
 # would swallow the mouse-up, so an Up-based close handler would never fire.
-$CloseBtn.Add_MouseLeftButtonDown({ $_.Handled = $true; $win.Close() })
+$CloseBtn.Add_MouseLeftButtonDown({ $_.Handled = $true; $script:userClosed = $true; $win.Close() })
 # One window-level drag handler (CloseBtn's Handled press never reaches it).
 # DragMove throws if the button was already released - ignore that.
 $win.Add_MouseLeftButtonDown({ try { $win.DragMove() } catch { } })
 
-$win.Add_Closing({ Save-WindowState })
+$win.Add_Closing({
+    Save-WindowState
+    # Only the x button sets $userClosed, so a forceful kill (/moth, install restart)
+    # or an OS shutdown never leaves a stray "stay hidden" marker behind.
+    if ($script:userClosed) { try { New-Item -ItemType File -Path $hiddenFlag -Force | Out-Null } catch { } }
+})
 
 # ---- minimize / restore ----
 # The window is normally taskbar-less (ShowInTaskbar=False); a minimized window with

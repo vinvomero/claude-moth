@@ -55,6 +55,27 @@ if (($cfg.PSObject.Properties.Name -contains 'statusLine') -and
 $sl = [pscustomobject]@{ type = 'command'; command = $cmd; padding = 0; refreshInterval = 15 }
 if ($cfg.PSObject.Properties.Name -contains 'statusLine') { $cfg.statusLine = $sl }
 else { $cfg | Add-Member -NotePropertyName statusLine -NotePropertyValue $sl }
+
+# --- 1a. Register the SessionStart hook so Moth reappears whenever a Claude session
+#         starts (terminal sessions; the desktop app doesn't fire hooks). Merged into
+#         any existing hooks, and idempotent - re-installing never stacks duplicates. ---
+$ensure  = Join-Path $root 'ensure-widget.ps1'
+$hookCmd = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + $ensure + '"'
+$hookEntry = [pscustomobject]@{
+    matcher = 'startup|resume'
+    hooks   = @([pscustomobject]@{ type = 'command'; command = $hookCmd; async = $true; timeout = 15 })
+}
+if (-not ($cfg.PSObject.Properties.Name -contains 'hooks') -or -not $cfg.hooks) {
+    $cfg | Add-Member -NotePropertyName hooks -NotePropertyValue ([pscustomobject]@{}) -Force
+}
+if (-not ($cfg.hooks.PSObject.Properties.Name -contains 'SessionStart') -or -not $cfg.hooks.SessionStart) {
+    $cfg.hooks | Add-Member -NotePropertyName SessionStart -NotePropertyValue @() -Force
+}
+$kept = @($cfg.hooks.SessionStart | Where-Object {
+    -not (@($_.hooks) | Where-Object { $_.command -like '*ensure-widget.ps1*' })
+})
+$cfg.hooks.SessionStart = @($kept) + $hookEntry
+
 Write-Utf8NoBom $settings ($cfg | ConvertTo-Json -Depth 100)
 
 # Validate what was written: no BOM at the byte level, and parseable JSON.
@@ -64,7 +85,7 @@ if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $by
 }
 try {
     [System.IO.File]::ReadAllText($settings) | ConvertFrom-Json | Out-Null
-    Write-Host "  [ok] status line registered; settings.json is valid JSON" -ForegroundColor Green
+    Write-Host "  [ok] status line + SessionStart hook registered; settings.json is valid JSON" -ForegroundColor Green
 } catch { throw "settings.json became invalid - restore from $backup. $_" }
 
 # --- 1b. Install the /moth slash command (restarts the widget from any session) ---
@@ -108,6 +129,8 @@ try {
             $_.CommandLine -notlike '*-SelfTest*' -and $_.CommandLine -notlike '*-Screenshot*' -and $_.CommandLine -notlike '*-Command*' } |
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 } catch { }
+# A fresh install should show the widget, so clear any leftover user-hide marker.
+Remove-Item (Join-Path $root 'widget-hidden.flag') -Force -ErrorAction SilentlyContinue
 # Let the old process fully tear down so it releases the single-instance mutex before
 # the new widget tries to acquire it (otherwise the fresh instance would exit as a dup).
 Start-Sleep -Milliseconds 700

@@ -25,14 +25,18 @@ Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" |
     Where-Object $isWidget |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force; $stopped++ }
 
-# 2. Let the OS tear the old process down and release the single-instance mutex
+# 2. /moth is an explicit "bring it back" - clear any user-hide marker so the ensure
+#    checks don't immediately treat the relaunch as unwanted.
+Remove-Item (Join-Path $root 'widget-hidden.flag') -Force -ErrorAction SilentlyContinue
+
+# 3. Let the OS tear the old process down and release the single-instance mutex
 #    before the new instance tries to acquire it.
 Start-Sleep -Milliseconds 700
 
-# 3. Relaunch hidden via the VBS (no console window).
+# 4. Relaunch hidden via the VBS (no console window).
 Start-Process 'wscript.exe' -ArgumentList ('"' + $vbs + '"')
 
-# 4. Confirm the new instance came up and report.
+# 5. Confirm the new instance came up and report.
 Start-Sleep -Milliseconds 1300
 $now = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
     Where-Object $isWidget)
