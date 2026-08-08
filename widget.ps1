@@ -30,17 +30,21 @@ if (Test-Path $cfgFile) {
     try { (Get-Content $cfgFile -Raw | ConvertFrom-Json).psobject.Properties | ForEach-Object { $cfg[$_.Name] = $_.Value } } catch { }
 }
 # Saved window position and per-user overrides (window-state.json is gitignored,
-# so personal settings like fable_bar can live here without dirtying the repo).
+# so personal settings like live_sync can live here without dirtying the repo).
 if (Test-Path $stateFile) {
     try {
         $st = Get-Content $stateFile -Raw | ConvertFrom-Json
         if ($null -ne $st.window_left) { $cfg.window_left = $st.window_left }
         if ($null -ne $st.window_top)  { $cfg.window_top  = $st.window_top }
-        if ($null -ne $st.fable_bar)   { $cfg.fable_bar   = $st.fable_bar }
+        # live_sync is the current name; fable_bar is the old one, still honored.
+        if ($null -ne $st.live_sync)   { $cfg.live_sync   = $st.live_sync }
+        elseif ($null -ne $st.fable_bar) { $cfg.live_sync = $st.fable_bar }
     } catch { }
 }
-# Opt-in per-model usage via the oauth/usage endpoint (undocumented; see README).
-$FABLE_ON = ($cfg.fable_bar -eq $true)
+# Opt-in live sync via the oauth/usage endpoint (undocumented; see README). This is
+# the PRIMARY data source for desktop-app users, who get no statusLine feed. Accept
+# either config key: live_sync (current) or fable_bar (legacy).
+$LIVE_SYNC_ON = ($cfg.live_sync -eq $true) -or ($cfg.fable_bar -eq $true)
 # Coerce every numeric setting back to a real number (the README invites hand-edits),
 # then clamp the ones where a bad range breaks the widget: a 0/negative timer interval
 # is a busy loop, and a non-positive track width kills the XAML parse.
@@ -209,7 +213,10 @@ function Update-Display {
     $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     $ageMin = [math]::Floor(($now - [long]$c.captured_at) / 60)
     $stale  = $ageMin -ge [int]$cfg.stale_minutes
-    $dim    = if ($stale) { 0.45 } else { 1.0 }
+    # STALE TREATMENT IS A SOLID-CARD TREATMENT, NEVER OPACITY. A dimmed card reads as
+    # "the widget is broken/transparent". Stale => bars desaturate to a muted grey-amber
+    # and the glow turns off; the card stays fully opaque and the label explains.
+    $STALE_BAR = '#8A7B5E'
 
     $p5 = [math]::Max(0, [math]::Min(100, ([double]$c.five_hour.used_percentage)))
     $p7 = [math]::Max(0, [math]::Min(100, ([double]$c.seven_day.used_percentage)))
@@ -217,22 +224,25 @@ function Update-Display {
     $Pct7.Text = ('{0}%' -f [math]::Round($p7))
     $Fill5.Width = $p5 / 100 * $TRACK
     $Fill7.Width = $p7 / 100 * $TRACK
-    $Fill5.Background = [Windows.Media.BrushConverter]::new().ConvertFromString((Get-BarColor $p5))
-    $Fill7.Background = [Windows.Media.BrushConverter]::new().ConvertFromString((Get-BarColor $p7))
-    # Keep each bar's glow the same color as the bar itself (amber -> orange -> red)
+    $col5 = if ($stale) { $STALE_BAR } else { Get-BarColor $p5 }
+    $col7 = if ($stale) { $STALE_BAR } else { Get-BarColor $p7 }
+    $Fill5.Background = [Windows.Media.BrushConverter]::new().ConvertFromString($col5)
+    $Fill7.Background = [Windows.Media.BrushConverter]::new().ConvertFromString($col7)
+    # Bar glow: match the bar when fresh, off (transparent) when stale.
     try {
-        if ($Fill5.Effect) { $Fill5.Effect.Color = [Windows.Media.ColorConverter]::ConvertFromString((Get-BarColor $p5)) }
-        if ($Fill7.Effect) { $Fill7.Effect.Color = [Windows.Media.ColorConverter]::ConvertFromString((Get-BarColor $p7)) }
+        if ($Fill5.Effect) { $Fill5.Effect.Opacity = if ($stale) { 0.0 } else { 0.55 }; $Fill5.Effect.Color = [Windows.Media.ColorConverter]::ConvertFromString($col5) }
+        if ($Fill7.Effect) { $Fill7.Effect.Opacity = if ($stale) { 0.0 } else { 0.55 }; $Fill7.Effect.Color = [Windows.Media.ColorConverter]::ConvertFromString($col7) }
     } catch { }
     $Reset5.Text = Format-Remaining ([long]$c.five_hour.resets_at)
     $Reset7.Text = Format-Remaining ([long]$c.seven_day.resets_at)
 
     # Hourglass: rotate 0deg -> 180deg across the 5-hour window (18000s), recomputed on
     # every 1s tick so it turns continuously. Hidden until real data exists (the no-cache
-    # branch above returns early); the card's stale-dim opacity dims it with everything else.
+    # branch above returns early). Muted (not hidden) when stale, matching the bars.
     $secsLeft5 = [long]$c.five_hour.resets_at - $now
     $frac5 = [math]::Max(0.0, [math]::Min(1.0, 1.0 - ([double]$secsLeft5 / 18000.0)))
     $Hourglass5Rot.Angle = 180.0 * $frac5
+    $Hourglass5.Foreground = [Windows.Media.BrushConverter]::new().ConvertFromString($(if ($stale) { $STALE_BAR } else { '#B08D53' }))
     $Hourglass5.Visibility = [Windows.Visibility]::Visible
 
     # Per-model weekly bar - rendered only when the cache carries a fable bucket
@@ -247,10 +257,15 @@ function Update-Display {
         $FableGroup.Visibility = [Windows.Visibility]::Collapsed
     }
 
-    $Card.Opacity = $dim
-    $txt = if ($ageMin -le 0) { 'updated just now' } else { ('updated {0}m ago' -f $ageMin) }
-    if ($script:epAuthHint) { $txt += ' | log in to Claude Code to refresh' }
-    $Updated.Text = $txt
+    # Card is ALWAYS fully opaque - staleness lives in the bars + label, never opacity.
+    $Card.Opacity = 1.0
+    if ($script:epAuthHint) {
+        $Updated.Text = 'log in to Claude Code to sync'
+    } elseif ($stale) {
+        $Updated.Text = if ($ageMin -ge 60) { ('last synced {0}h ago' -f [math]::Floor($ageMin/60)) } else { ('last synced {0}m ago' -f $ageMin) }
+    } else {
+        $Updated.Text = if ($ageMin -le 0) { 'updated just now' } else { ('updated {0}m ago' -f $ageMin) }
+    }
 }
 
 # ---- timers ----
@@ -262,10 +277,12 @@ $tick = New-Object Windows.Threading.DispatcherTimer
 $tick.Interval = [TimeSpan]::FromSeconds(1)
 $tick.Add_Tick({ if ($script:cache) { Update-Display } })
 
-# ---- optional endpoint poll (fable_bar) ----
-# Polls Anthropic's oauth/usage endpoint with the token Claude Code already stores,
-# for per-model weekly usage and freshness between sessions. UNDOCUMENTED endpoint:
-# see the README's honesty section. Never performs its own login; never logs the token.
+# ---- live sync: oauth/usage endpoint poll (PRIMARY source for desktop-app users) ----
+# The desktop app never runs the statusLine feed, so this endpoint is the only way to
+# keep the widget fresh there. Polls with the token Claude Code already maintains in
+# .credentials.json. UNDOCUMENTED endpoint: see the README's honesty section. Never
+# performs its own login; never logs the token. 180s base interval + User-Agent header
+# are REQUIRED endpoint etiquette (without the UA you get aggressively rate-limited).
 $EP_BASE_SECONDS = 180
 $script:epBackoff = $EP_BASE_SECONDS
 
@@ -277,9 +294,15 @@ function ConvertTo-PctScale($v) {
     return [math]::Max(0.0, [math]::Min(100.0, $d))
 }
 function ConvertTo-Epoch($v) {
+    # The endpoint has returned BOTH epoch integers and ISO 8601 strings over time
+    # ("2026-08-08T06:00:00.013303+00:00") - accept either. ISO parse must use
+    # InvariantCulture (locale-proof, same reason as the statusLine parser).
     $l = [long]0
     if ([long]::TryParse([string]$v, [System.Globalization.NumberStyles]::Integer,
             [System.Globalization.CultureInfo]::InvariantCulture, [ref]$l)) { return $l }
+    $dto = [DateTimeOffset]::MinValue
+    if ([DateTimeOffset]::TryParse([string]$v, [System.Globalization.CultureInfo]::InvariantCulture,
+            [System.Globalization.DateTimeStyles]::None, [ref]$dto)) { return [long]$dto.ToUnixTimeSeconds() }
     return $null
 }
 
@@ -289,12 +312,19 @@ function Invoke-EndpointPoll {
         $token = $null
         if (Test-Path $credFile) { $token = (Get-Content $credFile -Raw | ConvertFrom-Json).claudeAiOauth.accessToken }
         if (-not $token) {
-            # Newer Claude Code builds keep the token in OS-protected storage, not this
-            # file - the per-model bar can't authenticate then. Log once and stop polling.
-            Write-ErrorLog "fable_bar is on, but no login token is stored in .credentials.json (newer Claude Code keeps it in protected storage). Per-model bar unavailable; showing official two-bar data."
-            $ep.Stop()
+            # Token can be TRANSIENTLY absent (Claude Code rewrites the file on refresh;
+            # observed empty-then-repopulated the same evening). NEVER stop polling -
+            # show the login hint, back off, and recover automatically when it returns.
+            if (-not $script:epNoTokenLogged) {
+                Write-ErrorLog "live_sync: no login token in .credentials.json yet - will keep checking (backoff). Log in to Claude Code if this persists."
+                $script:epNoTokenLogged = $true
+            }
+            $script:epAuthHint = $true
+            $script:epBackoff = [math]::Min(1800, $script:epBackoff * 2)
+            $ep.Interval = [TimeSpan]::FromSeconds($script:epBackoff)
             return
         }
+        $script:epNoTokenLogged = $false
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         $resp = Invoke-RestMethod -Uri 'https://api.anthropic.com/api/oauth/usage' -TimeoutSec 15 -Headers @{
             'Authorization'  = "Bearer $token"
@@ -424,7 +454,7 @@ $win.Add_SourceInitialized({
     $script:cache = Read-Cache
     Update-Display
     $poll.Start(); $tick.Start()
-    if ($FABLE_ON) { $ep.Start(); Invoke-EndpointPoll }   # immediate first fetch
+    if ($LIVE_SYNC_ON) { $ep.Start(); Invoke-EndpointPoll }   # immediate first fetch
 })
 
 [void]$win.ShowDialog()
