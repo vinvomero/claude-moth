@@ -1,27 +1,25 @@
 # Moth
 
-```text
-         ' * '
+<p align="center">
+  <img src="assets/moth-demo.gif" alt="Moth — a desktop widget showing Claude Code 5-hour and weekly usage, glowing warm amber then orange then red as usage climbs" width="306">
+</p>
 
-  .-~\           /~-.
- /    \         /    \
- \     \       /     /
-  `~-.  \     /  .-~'
-      `-.\   /.-'
-         (o o)
-          ) (
-         /   \
-        '     `
-```
+**Your Claude Code usage, always in the corner of your eye — so you never stop to click into the app just to check.**
 
-**A little desktop moth, drawn to your Claude usage.**
+## Why this exists
 
-Moth is a small always-on-top card that shows your real Claude Code usage — the
-5-hour window and the weekly window — so you never have to open `/usage` again.
-Like its namesake, it lives beside the light: the more you burn, the warmer it glows.
+Seeing how much Claude Code you've used means stopping what you're doing, opening the
+app, and clicking into the usage screen — every single time. I just wanted to *know*,
+at a glance, without breaking focus.
 
-The numbers come straight from Claude Code's own official usage feed, so they match
-the `/usage` screen. Nothing is sent anywhere; everything runs on this PC.
+So Moth is a tiny always-on-top card that keeps your **5-hour** and **weekly** usage in
+the corner of your screen. It glows warm amber when you're fine, deepens to orange past
+70%, and burns red as you get close to the limit — so you feel the number without even
+reading it. No clicking, no context-switch. Like its namesake, it lives beside the
+light: the more you burn, the warmer it glows.
+
+The numbers come straight from Claude Code's own official usage feed, so they match the
+`/usage` screen exactly. Nothing is sent anywhere; everything runs on your PC.
 
 ## Setup (one time)
 
