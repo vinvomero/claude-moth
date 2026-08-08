@@ -4,12 +4,11 @@
   <img src="assets/moth-demo.gif" alt="Moth — a desktop widget showing Claude Code 5-hour and weekly usage, glowing warm amber then orange then red as usage climbs" width="306">
 </p>
 
-**Your Claude Code usage, always in the corner of your eye — so you never stop to click into the app just to check.**
+**Your Claude Code usage, always in the corner of your eye — so you never stop to click just to check.**
 
 ## Why this exists
 
-Seeing how much Claude Code you've used means stopping what you're doing, opening the
-app, and clicking into the usage screen — every single time. I just wanted to *know*,
+Seeing how much Claude Code you've used means stopping what you're doing and clicking into the usage screen — every single time. I just wanted to *know*,
 at a glance, without breaking focus.
 
 So Moth is a tiny always-on-top card that keeps your **5-hour** and **weekly** usage in
