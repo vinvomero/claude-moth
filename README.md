@@ -79,5 +79,20 @@ click the small **×** in its top-right corner.
 
 ## Privacy
 
-It does **not** touch your login token or call any private endpoints — it only reads the usage
-numbers Claude Code already shows you. Everything stays on your machine.
+By default it does **not** touch your login token or call any private endpoints — it only reads
+the usage numbers Claude Code already shows you. Everything stays on your machine.
+
+## Optional: per-model bar + always-fresh data (`fable_bar`)
+
+Off by default. Setting `"fable_bar": true` (in `config.json`, or in your personal
+`window-state.json` to keep the repo clean) adds a third bar with your **per-model weekly**
+usage (Fable/Opus) and refreshes all numbers every ~3 minutes even when Claude Code is closed.
+
+**Read this before enabling:** this mode calls an **undocumented** Anthropic endpoint
+(`api/oauth/usage`) using the login token Claude Code already stores on your machine. Several
+public tools do the same and it works reliably today, but Anthropic's policy language says
+subscription tokens are for Claude Code/claude.ai use, and the endpoint could change or break
+at any time. The widget never runs its own login, never logs or transmits the token anywhere
+except to Anthropic, backs off politely on errors, and degrades to the official two-bar
+display if the endpoint fails. If any of that makes you uncomfortable, leave it off — the
+default mode is fully within documented behavior.

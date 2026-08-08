@@ -29,14 +29,18 @@ $cfg = @{}; foreach ($k in @($defaults.Keys)) { $cfg[$k] = $defaults[$k] }
 if (Test-Path $cfgFile) {
     try { (Get-Content $cfgFile -Raw | ConvertFrom-Json).psobject.Properties | ForEach-Object { $cfg[$_.Name] = $_.Value } } catch { }
 }
-# Saved window position (written on close) overrides config defaults.
+# Saved window position and per-user overrides (window-state.json is gitignored,
+# so personal settings like fable_bar can live here without dirtying the repo).
 if (Test-Path $stateFile) {
     try {
         $st = Get-Content $stateFile -Raw | ConvertFrom-Json
         if ($null -ne $st.window_left) { $cfg.window_left = $st.window_left }
         if ($null -ne $st.window_top)  { $cfg.window_top  = $st.window_top }
+        if ($null -ne $st.fable_bar)   { $cfg.fable_bar   = $st.fable_bar }
     } catch { }
 }
+# Opt-in per-model usage via the oauth/usage endpoint (undocumented; see README).
+$FABLE_ON = ($cfg.fable_bar -eq $true)
 # Coerce every numeric setting back to a real number (the README invites hand-edits),
 # then clamp the ones where a bad range breaks the widget: a 0/negative timer interval
 # is a busy loop, and a non-positive track width kills the XAML parse.
@@ -55,38 +59,54 @@ $xaml = @"
         WindowStyle="None" AllowsTransparency="True" Background="Transparent"
         Topmost="True" ResizeMode="NoResize" ShowInTaskbar="False"
         SizeToContent="WidthAndHeight" Title="Claude Usage">
-  <Border x:Name="Card" CornerRadius="14" Background="#F0121826" Padding="16,12,16,12">
+  <Border x:Name="Card" CornerRadius="14" Background="#FA10141E" Padding="16,12,16,12">
     <Border.Effect><DropShadowEffect BlurRadius="18" ShadowDepth="0" Opacity="0.5" Color="#000000"/></Border.Effect>
     <StackPanel>
       <Grid x:Name="TitleBar" Margin="0,0,0,10">
-        <TextBlock Text="Claude usage" Foreground="#9FB2C8" FontFamily="Segoe UI" FontSize="11" FontWeight="SemiBold"
+        <TextBlock Text="Claude usage" Foreground="#AFC2D8" FontFamily="Segoe UI" FontSize="12" FontWeight="SemiBold"
                    HorizontalAlignment="Left" VerticalAlignment="Center"/>
-        <TextBlock x:Name="CloseBtn" Text="&#215;" Foreground="#5A6B82" FontFamily="Segoe UI" FontSize="15"
-                   HorizontalAlignment="Right" VerticalAlignment="Center" Cursor="Hand"/>
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+          <TextBlock x:Name="MinBtn" Text="&#8211;" Foreground="#6A7B92" FontFamily="Segoe UI" FontSize="16"
+                     Cursor="Hand" Margin="0,0,10,0" ToolTip="Minimize to taskbar"/>
+          <TextBlock x:Name="CloseBtn" Text="&#215;" Foreground="#6A7B92" FontFamily="Segoe UI" FontSize="16"
+                     Cursor="Hand" ToolTip="Close"/>
+        </StackPanel>
       </Grid>
 
       <!-- 5-hour -->
       <Grid Margin="0,0,0,2">
-        <TextBlock Text="5-hour" Foreground="#C7D3E3" FontFamily="Segoe UI" FontSize="12" HorizontalAlignment="Left"/>
-        <TextBlock x:Name="Pct5" Text="--%" Foreground="#FFFFFF" FontFamily="Segoe UI" FontSize="12" FontWeight="SemiBold" HorizontalAlignment="Right"/>
+        <TextBlock Text="5-hour" Foreground="#D7E1EE" FontFamily="Segoe UI" FontSize="13" HorizontalAlignment="Left"/>
+        <TextBlock x:Name="Pct5" Text="--%" Foreground="#FFFFFF" FontFamily="Segoe UI" FontSize="13" FontWeight="SemiBold" HorizontalAlignment="Right"/>
       </Grid>
-      <Border Width="$TRACK" Height="8" CornerRadius="4" Background="#22314A" HorizontalAlignment="Left" Margin="0,0,0,2">
+      <Border Width="$TRACK" Height="8" CornerRadius="4" Background="#26344E" HorizontalAlignment="Left" Margin="0,0,0,2">
         <Border x:Name="Fill5" Width="0" Height="8" CornerRadius="4" Background="#4CC2FF" HorizontalAlignment="Left"/>
       </Border>
-      <TextBlock x:Name="Reset5" Text="" Foreground="#7C8CA3" FontFamily="Segoe UI" FontSize="10" Margin="0,0,0,10"/>
+      <TextBlock x:Name="Reset5" Text="" Foreground="#8C9CB3" FontFamily="Segoe UI" FontSize="11" Margin="0,0,0,10"/>
 
       <!-- Weekly -->
       <Grid Margin="0,0,0,2">
-        <TextBlock Text="Weekly" Foreground="#C7D3E3" FontFamily="Segoe UI" FontSize="12" HorizontalAlignment="Left"/>
-        <TextBlock x:Name="Pct7" Text="--%" Foreground="#FFFFFF" FontFamily="Segoe UI" FontSize="12" FontWeight="SemiBold" HorizontalAlignment="Right"/>
+        <TextBlock Text="Weekly" Foreground="#D7E1EE" FontFamily="Segoe UI" FontSize="13" HorizontalAlignment="Left"/>
+        <TextBlock x:Name="Pct7" Text="--%" Foreground="#FFFFFF" FontFamily="Segoe UI" FontSize="13" FontWeight="SemiBold" HorizontalAlignment="Right"/>
       </Grid>
-      <Border Width="$TRACK" Height="8" CornerRadius="4" Background="#22314A" HorizontalAlignment="Left" Margin="0,0,0,2">
+      <Border Width="$TRACK" Height="8" CornerRadius="4" Background="#26344E" HorizontalAlignment="Left" Margin="0,0,0,2">
         <Border x:Name="Fill7" Width="0" Height="8" CornerRadius="4" Background="#4CC2FF" HorizontalAlignment="Left"/>
       </Border>
-      <TextBlock x:Name="Reset7" Text="" Foreground="#7C8CA3" FontFamily="Segoe UI" FontSize="10" Margin="0,0,0,8"/>
+      <TextBlock x:Name="Reset7" Text="" Foreground="#8C9CB3" FontFamily="Segoe UI" FontSize="11" Margin="0,0,0,8"/>
 
-      <TextBlock x:Name="Updated" Text="waiting for first Claude session..." Foreground="#5A6B82"
-                 FontFamily="Segoe UI" FontSize="10" HorizontalAlignment="Left"/>
+      <!-- Per-model weekly (endpoint mode only; hidden until data arrives) -->
+      <StackPanel x:Name="FableGroup" Visibility="Collapsed">
+        <Grid Margin="0,0,0,2">
+          <TextBlock x:Name="FableLabel" Text="Fable (weekly)" Foreground="#D7E1EE" FontFamily="Segoe UI" FontSize="13" HorizontalAlignment="Left"/>
+          <TextBlock x:Name="PctF" Text="--%" Foreground="#FFFFFF" FontFamily="Segoe UI" FontSize="13" FontWeight="SemiBold" HorizontalAlignment="Right"/>
+        </Grid>
+        <Border Width="$TRACK" Height="8" CornerRadius="4" Background="#26344E" HorizontalAlignment="Left" Margin="0,0,0,2">
+          <Border x:Name="FillF" Width="0" Height="8" CornerRadius="4" Background="#B48CFF" HorizontalAlignment="Left"/>
+        </Border>
+        <TextBlock x:Name="ResetF" Text="" Foreground="#8C9CB3" FontFamily="Segoe UI" FontSize="11" Margin="0,0,0,8"/>
+      </StackPanel>
+
+      <TextBlock x:Name="Updated" Text="waiting for first Claude session..." Foreground="#6A7B92"
+                 FontFamily="Segoe UI" FontSize="11" HorizontalAlignment="Left"/>
     </StackPanel>
   </Border>
 </Window>
@@ -101,8 +121,11 @@ $win = [Windows.Markup.XamlReader]::Parse($xaml)
 
 $Card    = $win.FindName('Card')
 $CloseBtn= $win.FindName('CloseBtn')
+$MinBtn  = $win.FindName('MinBtn')
 $Pct5    = $win.FindName('Pct5');  $Fill5 = $win.FindName('Fill5');  $Reset5 = $win.FindName('Reset5')
 $Pct7    = $win.FindName('Pct7');  $Fill7 = $win.FindName('Fill7');  $Reset7 = $win.FindName('Reset7')
+$FableGroup = $win.FindName('FableGroup'); $FableLabel = $win.FindName('FableLabel')
+$PctF    = $win.FindName('PctF');  $FillF = $win.FindName('FillF');  $ResetF = $win.FindName('ResetF')
 $Updated = $win.FindName('Updated')
 
 $win.Left = [double]$cfg.window_left
@@ -155,9 +178,22 @@ function Update-Display {
     $Reset5.Text = Format-Remaining ([long]$c.five_hour.resets_at)
     $Reset7.Text = Format-Remaining ([long]$c.seven_day.resets_at)
 
+    # Per-model weekly bar - rendered only when the cache carries a fable bucket
+    if ($c.fable -and $null -ne $c.fable.used_percentage) {
+        $pf = [math]::Max(0, [math]::Min(100, ([double]$c.fable.used_percentage)))
+        $PctF.Text = ('{0}%' -f [math]::Round($pf))
+        $FillF.Width = $pf / 100 * $TRACK
+        if ($c.fable.label) { $FableLabel.Text = ('{0} (weekly)' -f $c.fable.label) }
+        if ($c.fable.resets_at) { $ResetF.Text = Format-Remaining ([long]$c.fable.resets_at) }
+        $FableGroup.Visibility = [Windows.Visibility]::Visible
+    } else {
+        $FableGroup.Visibility = [Windows.Visibility]::Collapsed
+    }
+
     $Card.Opacity = $dim
-    if ($ageMin -le 0) { $Updated.Text = 'updated just now' }
-    else { $Updated.Text = ('updated {0}m ago' -f $ageMin) }
+    $txt = if ($ageMin -le 0) { 'updated just now' } else { ('updated {0}m ago' -f $ageMin) }
+    if ($script:epAuthHint) { $txt += ' | log in to Claude Code to refresh' }
+    $Updated.Text = $txt
 }
 
 # ---- timers ----
@@ -168,6 +204,101 @@ $poll.Add_Tick({ $script:cache = Read-Cache; Update-Display })
 $tick = New-Object Windows.Threading.DispatcherTimer
 $tick.Interval = [TimeSpan]::FromSeconds(1)
 $tick.Add_Tick({ if ($script:cache) { Update-Display } })
+
+# ---- optional endpoint poll (fable_bar) ----
+# Polls Anthropic's oauth/usage endpoint with the token Claude Code already stores,
+# for per-model weekly usage and freshness between sessions. UNDOCUMENTED endpoint:
+# see the README's honesty section. Never performs its own login; never logs the token.
+$EP_BASE_SECONDS = 180
+$script:epBackoff = $EP_BASE_SECONDS
+
+function ConvertTo-PctScale($v) {
+    # Endpoint utilization may be 0-1 fraction or 0-100 percent; normalize to 0-100.
+    $d = $v -as [double]
+    if ($null -eq $d -or [double]::IsNaN($d)) { return $null }
+    if ($d -le 1.0) { $d = $d * 100 }
+    return [math]::Max(0.0, [math]::Min(100.0, $d))
+}
+function ConvertTo-Epoch($v) {
+    $l = [long]0
+    if ([long]::TryParse([string]$v, [System.Globalization.NumberStyles]::Integer,
+            [System.Globalization.CultureInfo]::InvariantCulture, [ref]$l)) { return $l }
+    return $null
+}
+
+function Invoke-EndpointPoll {
+    try {
+        $credFile = Join-Path $env:USERPROFILE '.claude\.credentials.json'
+        $token = $null
+        if (Test-Path $credFile) { $token = (Get-Content $credFile -Raw | ConvertFrom-Json).claudeAiOauth.accessToken }
+        if (-not $token) {
+            # Newer Claude Code builds keep the token in OS-protected storage, not this
+            # file - the per-model bar can't authenticate then. Log once and stop polling.
+            Write-ErrorLog "fable_bar is on, but no login token is stored in .credentials.json (newer Claude Code keeps it in protected storage). Per-model bar unavailable; showing official two-bar data."
+            $ep.Stop()
+            return
+        }
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $resp = Invoke-RestMethod -Uri 'https://api.anthropic.com/api/oauth/usage' -TimeoutSec 15 -Headers @{
+            'Authorization'  = "Bearer $token"
+            'anthropic-beta' = 'oauth-2025-04-20'
+            'User-Agent'     = 'claude-code/2.1.224'
+        }
+        $script:epBackoff = $EP_BASE_SECONDS   # success resets backoff
+        $script:epAuthHint = $false
+
+        $p5 = ConvertTo-PctScale $resp.five_hour.utilization
+        $r5 = ConvertTo-Epoch    $resp.five_hour.resets_at
+        $p7 = ConvertTo-PctScale $resp.seven_day.utilization
+        $r7 = ConvertTo-Epoch    $resp.seven_day.resets_at
+
+        # Discover the per-model weekly bucket at runtime (seven_day_fable /
+        # seven_day_opus / ...) rather than hardcoding a model name.
+        $modelKey = $null
+        foreach ($pref in @('seven_day_fable','seven_day_opus','seven_day_sonnet')) {
+            if ($resp.PSObject.Properties.Name -contains $pref -and $resp.$pref) { $modelKey = $pref; break }
+        }
+
+        if ($null -ne $p5 -and $null -ne $r5 -and $null -ne $p7 -and $null -ne $r7) {
+            $obj = [ordered]@{
+                five_hour   = [ordered]@{ used_percentage = $p5; resets_at = $r5 }
+                seven_day   = [ordered]@{ used_percentage = $p7; resets_at = $r7 }
+            }
+            if ($modelKey) {
+                $pm = ConvertTo-PctScale $resp.$modelKey.utilization
+                if ($null -ne $pm) {
+                    $label = (Get-Culture).TextInfo.ToTitleCase(($modelKey -replace '^seven_day_',''))
+                    $obj.fable = [ordered]@{
+                        used_percentage = $pm
+                        resets_at       = ConvertTo-Epoch $resp.$modelKey.resets_at
+                        label           = $label
+                    }
+                }
+            }
+            $obj.captured_at = [long][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+            $json = [pscustomobject]$obj | ConvertTo-Json -Depth 5
+            $tmp = "$cacheFile.tmp"
+            Write-Utf8NoBom $tmp $json
+            if (Test-Path $cacheFile) { [System.IO.File]::Replace($tmp, $cacheFile, [NullString]::Value) }
+            else { Move-Item -Path $tmp -Destination $cacheFile -Force }
+            $script:cache = Read-Cache
+            Update-Display
+        }
+    } catch {
+        $code = 0
+        try { $code = [int]$_.Exception.Response.StatusCode } catch { }
+        if ($code -eq 401) { $script:epAuthHint = $true }
+        # diagnostic only - status + exception text, never the token or response body
+        Write-ErrorLog ("endpoint poll failed: HTTP {0} - {1}" -f $code, $_.Exception.Message)
+        # back off on any failure (429, network, schema change): double up to 30 min
+        $script:epBackoff = [math]::Min(1800, $script:epBackoff * 2)
+        $ep.Interval = [TimeSpan]::FromSeconds($script:epBackoff)
+    }
+}
+
+$ep = New-Object Windows.Threading.DispatcherTimer
+$ep.Interval = [TimeSpan]::FromSeconds($EP_BASE_SECONDS)
+$ep.Add_Tick({ Invoke-EndpointPoll })
 
 # ---- interaction ----
 # Close on button-DOWN and mark it handled: a DragMove started by a bubbled press
@@ -180,10 +311,29 @@ $win.Add_MouseLeftButtonDown({ try { $win.DragMove() } catch { } })
 $win.Add_Closing({
     # Persist position to the gitignored state file - never rewrite config.json,
     # which is a tracked file (rewriting it would dirty every user's clone).
+    # Merge into the existing state so other per-user keys (fable_bar) survive.
     try {
-        $st = [ordered]@{ window_left = [int]$win.Left; window_top = [int]$win.Top }
-        Write-Utf8NoBom $stateFile ($st | ConvertTo-Json)
+        $st = @{}
+        if (Test-Path $stateFile) {
+            try { (Get-Content $stateFile -Raw | ConvertFrom-Json).psobject.Properties | ForEach-Object { $st[$_.Name] = $_.Value } } catch { }
+        }
+        $st.window_left = [int]$win.Left
+        $st.window_top  = [int]$win.Top
+        Write-Utf8NoBom $stateFile ([pscustomobject]$st | ConvertTo-Json)
     } catch { }
+})
+
+# ---- minimize / restore ----
+# The window is normally taskbar-less (ShowInTaskbar=False); a minimized window with
+# no taskbar entry would be unrecoverable. So: enable the taskbar entry just for the
+# minimized period, and hide it again when the user restores from the taskbar.
+$MinBtn.Add_MouseLeftButtonDown({
+    $_.Handled = $true
+    $win.ShowInTaskbar = $true
+    $win.WindowState = [Windows.WindowState]::Minimized
+})
+$win.Add_StateChanged({
+    if ($win.WindowState -eq [Windows.WindowState]::Normal) { $win.ShowInTaskbar = $false }
 })
 
 if ($SelfTest -or $Screenshot) {
@@ -215,6 +365,7 @@ $win.Add_SourceInitialized({
     $script:cache = Read-Cache
     Update-Display
     $poll.Start(); $tick.Start()
+    if ($FABLE_ON) { $ep.Start(); Invoke-EndpointPoll }   # immediate first fetch
 })
 
 [void]$win.ShowDialog()

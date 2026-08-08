@@ -61,8 +61,16 @@ if ($null -ne $p5 -and $null -ne $r5 -and $null -ne $p7 -and $null -ne $r7) {
     $obj = [ordered]@{
         five_hour   = [ordered]@{ used_percentage = $p5; resets_at = $r5 }
         seven_day   = [ordered]@{ used_percentage = $p7; resets_at = $r7 }
-        captured_at = [long][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     }
+    # The statusLine feed has no per-model data; if the widget's optional endpoint
+    # poll stored a fable bucket, carry it forward instead of wiping the third bar.
+    if (Test-Path $cacheFile) {
+        try {
+            $prev = Get-Content $cacheFile -Raw | ConvertFrom-Json
+            if ($prev.fable) { $obj.fable = $prev.fable }
+        } catch { }
+    }
+    $obj.captured_at = [long][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     $json = $obj | ConvertTo-Json -Depth 5
     if ($json -and $json.Trim().Length -gt 2) {
         $tmp = "$cacheFile.tmp"
