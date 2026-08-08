@@ -49,9 +49,30 @@ Until then it shows "waiting for Claude usage data…".
 - **Weekly** — same, for the 7-day window.
 - The glow tells the story: **warm amber** normally, **deep orange** past 70%,
   **red** past 90% — the flame rising as you get close to the limit.
-- "updated Nm ago" tells you how fresh the numbers are. Moth refreshes while you're
-  using Claude Code; when you're idle it dims slightly and keeps counting down the
-  reset timers. (That's expected — usage only changes while you're working.)
+- "updated Nm ago" tells you how fresh the numbers are. If data ever goes stale, the
+  bars mute to grey and the label says "last synced Nm ago" — the card stays fully
+  solid, never see-through.
+
+## Keeping it fresh — live sync
+
+Claude Code's status-line feed (Moth's default source) only runs in the **terminal**,
+not the desktop app. If you live in the desktop app, turn on **live sync** so Moth
+reads your usage directly instead:
+
+```json
+// in config.json, or your gitignored window-state.json
+"live_sync": true
+```
+
+Live sync pulls the same numbers the `/usage` command shows, using the login token
+Claude Code already keeps on your machine. See the honesty section below before
+enabling — it's off by default on purpose.
+
+## Mac
+
+There's a menu-bar Moth for macOS too — a [SwiftBar](https://github.com/swiftbar/SwiftBar)
+plugin in [`mac/`](mac/). Same real 5-hour + weekly numbers, same amber palette, in
+your menu bar. See [`mac/README.md`](mac/README.md) for setup.
 
 ## The `/moth` command
 
@@ -116,20 +137,25 @@ folder somewhere only you can write to, so nobody can swap `widget.ps1` out from
 By default it does **not** touch your login token or call any private endpoints — it only reads
 the usage numbers Claude Code already shows you. Everything stays on your machine.
 
-## Optional: per-model bar + always-fresh data (`fable_bar`)
+## Live sync — the honest details (`live_sync`)
 
-Off by default. Setting `"fable_bar": true` (in `config.json`, or in your personal
-`window-state.json` to keep the repo clean) adds a third bar with your **per-model weekly**
-usage (Fable/Opus) and refreshes all numbers every ~3 minutes even when Claude Code is closed.
+Off by default. Setting `"live_sync": true` (in `config.json`, or in your personal
+`window-state.json` to keep the repo clean) makes Moth refresh directly from Anthropic
+every ~3 minutes — even in the desktop app, even when no terminal session is running —
+and shows a third **per-model weekly** bar (Opus/Sonnet/Fable) when available.
+*(The old key name `fable_bar` still works.)*
+
+**Why you'd want it:** the status-line feed only runs in the terminal. In the desktop
+app, live sync is the only way to keep the numbers current.
 
 **Read this before enabling:** this mode calls an **undocumented** Anthropic endpoint
 (`api/oauth/usage`) using the login token Claude Code already stores on your machine. Several
 public tools do the same and it works reliably today, but Anthropic's policy language says
 subscription tokens are for Claude Code/claude.ai use, and the endpoint could change or break
 at any time. The widget never runs its own login, never logs or transmits the token anywhere
-except to Anthropic, backs off politely on errors, and degrades to the official two-bar
-display if the endpoint fails. If any of that makes you uncomfortable, leave it off — the
-default mode is fully within documented behavior.
+except to Anthropic, sends the `User-Agent` the endpoint expects, backs off politely on errors,
+and degrades to the status-line feed if the endpoint fails. If any of that makes you
+uncomfortable, leave it off — the default mode is fully within documented behavior.
 
 ```text
        *
