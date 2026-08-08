@@ -1,4 +1,4 @@
-# /Moth
+# /moth
 
 ```text
          ' * '
