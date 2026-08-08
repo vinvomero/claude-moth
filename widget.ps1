@@ -59,59 +59,73 @@ $xaml = @"
         WindowStyle="None" AllowsTransparency="True" Background="Transparent"
         Topmost="True" ResizeMode="NoResize" ShowInTaskbar="False"
         SizeToContent="WidthAndHeight" Title="Moth">
-  <Border x:Name="Card" CornerRadius="14" Background="#FA10141E" Padding="16,12,16,12">
-    <Border.Effect><DropShadowEffect BlurRadius="18" ShadowDepth="0" Opacity="0.5" Color="#000000"/></Border.Effect>
+  <Border x:Name="Card" CornerRadius="14" Background="#FB0B0D14" BorderBrush="#1A1E2E" BorderThickness="1" Padding="16,12,16,12">
+    <Border.Effect><DropShadowEffect BlurRadius="26" ShadowDepth="0" Opacity="0.18" Color="#FFB65C"/></Border.Effect>
     <StackPanel>
       <Grid x:Name="TitleBar" Margin="0,0,0,10">
-        <TextBlock Text="Moth" Foreground="#AFC2D8" FontFamily="Segoe UI" FontSize="12" FontWeight="SemiBold"
-                   HorizontalAlignment="Left" VerticalAlignment="Center"/>
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Left" VerticalAlignment="Center">
+          <!-- Moth logo: spark above, wings swept up toward it, tail below (the A mark) -->
+          <Canvas Width="16" Height="14" Margin="0,1,7,0">
+            <Ellipse Canvas.Left="7.4" Canvas.Top="0.2" Width="1.4" Height="1.4" Fill="#FFF3DF"/>
+            <Path Data="M8,5.6 L2.4,2.4 C0.8,1.6 0,3.2 0.8,4.8 L5.6,8.8 Z" Fill="#FFB65C"/>
+            <Path Data="M8,5.6 L13.6,2.4 C15.2,1.6 16,3.2 15.2,4.8 L10.4,8.8 Z" Fill="#FFB65C"/>
+            <Path Data="M8,5.4 L4.4,10.4 C3.6,11.8 4.4,12.8 5.4,12.1 L8,9.9 L10.6,12.1 C11.6,12.8 12.4,11.8 11.6,10.4 Z" Fill="#E8A34C"/>
+            <Ellipse Canvas.Left="6.9" Canvas.Top="5.6" Width="2.2" Height="2.2" Fill="#FFF3DF"/>
+          </Canvas>
+          <TextBlock Text="Moth" Foreground="#F5E9D5" FontFamily="Segoe UI" FontSize="12" FontWeight="SemiBold"
+                     VerticalAlignment="Center"/>
+        </StackPanel>
         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
-          <TextBlock x:Name="MinBtn" Text="&#8211;" Foreground="#6A7B92" FontFamily="Segoe UI" FontSize="16"
+          <TextBlock x:Name="MinBtn" Text="&#8211;" Foreground="#5A5240" FontFamily="Segoe UI" FontSize="16"
                      Cursor="Hand" Margin="0,0,10,0" ToolTip="Minimize to taskbar"/>
-          <TextBlock x:Name="CloseBtn" Text="&#215;" Foreground="#6A7B92" FontFamily="Segoe UI" FontSize="16"
+          <TextBlock x:Name="CloseBtn" Text="&#215;" Foreground="#5A5240" FontFamily="Segoe UI" FontSize="16"
                      Cursor="Hand" ToolTip="Close"/>
         </StackPanel>
       </Grid>
 
       <!-- 5-hour -->
       <Grid Margin="0,0,0,2">
-        <TextBlock Text="5-hour" Foreground="#D7E1EE" FontFamily="Segoe UI" FontSize="13" HorizontalAlignment="Left"/>
-        <TextBlock x:Name="Pct5" Text="--%" Foreground="#FFFFFF" FontFamily="Segoe UI" FontSize="13" FontWeight="SemiBold" HorizontalAlignment="Right"/>
+        <TextBlock Text="5-hour" Foreground="#C9BFA9" FontFamily="Segoe UI" FontSize="13" HorizontalAlignment="Left"/>
+        <TextBlock x:Name="Pct5" Text="--%" Foreground="#FFD9A0" FontFamily="Segoe UI" FontSize="13" FontWeight="SemiBold" HorizontalAlignment="Right"/>
       </Grid>
-      <Border Width="$TRACK" Height="8" CornerRadius="4" Background="#26344E" HorizontalAlignment="Left" Margin="0,0,0,2">
-        <Border x:Name="Fill5" Width="0" Height="8" CornerRadius="4" Background="#4CC2FF" HorizontalAlignment="Left"/>
+      <Border Width="$TRACK" Height="8" CornerRadius="4" Background="#181A24" HorizontalAlignment="Left" Margin="0,0,0,2">
+        <Border x:Name="Fill5" Width="0" Height="8" CornerRadius="4" Background="#FFB65C" HorizontalAlignment="Left">
+          <Border.Effect><DropShadowEffect BlurRadius="8" ShadowDepth="0" Opacity="0.55" Color="#FFB65C"/></Border.Effect>
+        </Border>
       </Border>
       <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
-        <TextBlock x:Name="Hourglass5" Text="&#x231B;" Foreground="#8C9CB3" FontFamily="Segoe UI Symbol" FontSize="11"
+        <TextBlock x:Name="Hourglass5" Text="&#x231B;" Foreground="#B08D53" FontFamily="Segoe UI Symbol" FontSize="11"
                    Margin="0,0,4,0" VerticalAlignment="Center" Visibility="Collapsed" RenderTransformOrigin="0.5,0.5">
           <TextBlock.RenderTransform><RotateTransform x:Name="Hourglass5Rot" Angle="0"/></TextBlock.RenderTransform>
         </TextBlock>
-        <TextBlock x:Name="Reset5" Text="" Foreground="#8C9CB3" FontFamily="Segoe UI" FontSize="11" VerticalAlignment="Center"/>
+        <TextBlock x:Name="Reset5" Text="" Foreground="#6E6552" FontFamily="Segoe UI" FontSize="11" VerticalAlignment="Center"/>
       </StackPanel>
 
       <!-- Weekly -->
       <Grid Margin="0,0,0,2">
-        <TextBlock Text="Weekly" Foreground="#D7E1EE" FontFamily="Segoe UI" FontSize="13" HorizontalAlignment="Left"/>
-        <TextBlock x:Name="Pct7" Text="--%" Foreground="#FFFFFF" FontFamily="Segoe UI" FontSize="13" FontWeight="SemiBold" HorizontalAlignment="Right"/>
+        <TextBlock Text="Weekly" Foreground="#C9BFA9" FontFamily="Segoe UI" FontSize="13" HorizontalAlignment="Left"/>
+        <TextBlock x:Name="Pct7" Text="--%" Foreground="#FFD9A0" FontFamily="Segoe UI" FontSize="13" FontWeight="SemiBold" HorizontalAlignment="Right"/>
       </Grid>
-      <Border Width="$TRACK" Height="8" CornerRadius="4" Background="#26344E" HorizontalAlignment="Left" Margin="0,0,0,2">
-        <Border x:Name="Fill7" Width="0" Height="8" CornerRadius="4" Background="#4CC2FF" HorizontalAlignment="Left"/>
+      <Border Width="$TRACK" Height="8" CornerRadius="4" Background="#181A24" HorizontalAlignment="Left" Margin="0,0,0,2">
+        <Border x:Name="Fill7" Width="0" Height="8" CornerRadius="4" Background="#FFB65C" HorizontalAlignment="Left">
+          <Border.Effect><DropShadowEffect BlurRadius="8" ShadowDepth="0" Opacity="0.55" Color="#FFB65C"/></Border.Effect>
+        </Border>
       </Border>
-      <TextBlock x:Name="Reset7" Text="" Foreground="#8C9CB3" FontFamily="Segoe UI" FontSize="11" Margin="0,0,0,8"/>
+      <TextBlock x:Name="Reset7" Text="" Foreground="#6E6552" FontFamily="Segoe UI" FontSize="11" Margin="0,0,0,8"/>
 
       <!-- Per-model weekly (endpoint mode only; hidden until data arrives) -->
       <StackPanel x:Name="FableGroup" Visibility="Collapsed">
         <Grid Margin="0,0,0,2">
-          <TextBlock x:Name="FableLabel" Text="Fable (weekly)" Foreground="#D7E1EE" FontFamily="Segoe UI" FontSize="13" HorizontalAlignment="Left"/>
-          <TextBlock x:Name="PctF" Text="--%" Foreground="#FFFFFF" FontFamily="Segoe UI" FontSize="13" FontWeight="SemiBold" HorizontalAlignment="Right"/>
+          <TextBlock x:Name="FableLabel" Text="Fable (weekly)" Foreground="#C9BFA9" FontFamily="Segoe UI" FontSize="13" HorizontalAlignment="Left"/>
+          <TextBlock x:Name="PctF" Text="--%" Foreground="#FFD9A0" FontFamily="Segoe UI" FontSize="13" FontWeight="SemiBold" HorizontalAlignment="Right"/>
         </Grid>
-        <Border Width="$TRACK" Height="8" CornerRadius="4" Background="#26344E" HorizontalAlignment="Left" Margin="0,0,0,2">
-          <Border x:Name="FillF" Width="0" Height="8" CornerRadius="4" Background="#B48CFF" HorizontalAlignment="Left"/>
+        <Border Width="$TRACK" Height="8" CornerRadius="4" Background="#181A24" HorizontalAlignment="Left" Margin="0,0,0,2">
+          <Border x:Name="FillF" Width="0" Height="8" CornerRadius="4" Background="#E8A34C" HorizontalAlignment="Left"/>
         </Border>
-        <TextBlock x:Name="ResetF" Text="" Foreground="#8C9CB3" FontFamily="Segoe UI" FontSize="11" Margin="0,0,0,8"/>
+        <TextBlock x:Name="ResetF" Text="" Foreground="#6E6552" FontFamily="Segoe UI" FontSize="11" Margin="0,0,0,8"/>
       </StackPanel>
 
-      <TextBlock x:Name="Updated" Text="waiting for Claude usage data..." Foreground="#6A7B92"
+      <TextBlock x:Name="Updated" Text="waiting for Claude usage data..." Foreground="#6E6552"
                  FontFamily="Segoe UI" FontSize="11" HorizontalAlignment="Left"/>
     </StackPanel>
   </Border>
@@ -140,9 +154,10 @@ $win.Top  = [double]$cfg.window_top
 
 # ---- helpers ----
 function Get-BarColor([double]$pct) {
-    if ($pct -ge 90) { return '#FF5C6E' }      # red
-    elseif ($pct -ge 70) { return '#FFC24C' }  # amber
-    else { return '#4CC2FF' }                  # blue
+    # "Drawn to the light" palette: the lamp burns warmer as you use more.
+    if ($pct -ge 90) { return '#FF5C6E' }      # red - about to burn out
+    elseif ($pct -ge 70) { return '#FF9D42' }  # deep orange - flame rising
+    else { return '#FFB65C' }                  # warm amber - steady glow
 }
 function Format-Remaining([long]$resetAt) {
     $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
@@ -204,6 +219,11 @@ function Update-Display {
     $Fill7.Width = $p7 / 100 * $TRACK
     $Fill5.Background = [Windows.Media.BrushConverter]::new().ConvertFromString((Get-BarColor $p5))
     $Fill7.Background = [Windows.Media.BrushConverter]::new().ConvertFromString((Get-BarColor $p7))
+    # Keep each bar's glow the same color as the bar itself (amber -> orange -> red)
+    try {
+        if ($Fill5.Effect) { $Fill5.Effect.Color = [Windows.Media.ColorConverter]::ConvertFromString((Get-BarColor $p5)) }
+        if ($Fill7.Effect) { $Fill7.Effect.Color = [Windows.Media.ColorConverter]::ConvertFromString((Get-BarColor $p7)) }
+    } catch { }
     $Reset5.Text = Format-Remaining ([long]$c.five_hour.resets_at)
     $Reset7.Text = Format-Remaining ([long]$c.seven_day.resets_at)
 

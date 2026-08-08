@@ -1,0 +1,14 @@
+<svg width="80" height="68" viewBox="0 0 40 34" xmlns="http://www.w3.org/2000/svg">
+  <title>Moth</title>
+  <desc>The Moth mark: a moth with wings swept up toward a small spark of light.</desc>
+  <!-- spark -->
+  <circle cx="20" cy="4" r="1.4" fill="#FFF3DF"/>
+  <path d="M20 4 L17.6 7.4 M20 4 L22.4 7.4 M20 4 L20 1" stroke="#FFB65C" stroke-width=".7" opacity=".7"/>
+  <!-- upper wings, reaching for the light -->
+  <path d="M20 14 L6 6 C2 4 0 8 2 12 L14 22 Z" fill="#FFB65C"/>
+  <path d="M20 14 L34 6 C38 4 40 8 38 12 L26 22 Z" fill="#FFB65C"/>
+  <!-- tail wings -->
+  <path d="M20 13.5 L11 26 C9 29.4 11 32 13.4 30.2 L20 24.6 L26.6 30.2 C29 32 31 29.4 29 26 Z" fill="#E8A34C"/>
+  <!-- head -->
+  <circle cx="20" cy="16.6" r="2.6" fill="#FFF3DF"/>
+</svg>

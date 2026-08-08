@@ -1,7 +1,24 @@
-# Claude Usage Widget
+# Moth
 
-A small bar that floats on your desktop and shows your real Claude Code usage — the
+```text
+         ' * '
+
+  .-~\           /~-.
+ /    \         /    \
+ \     \       /     /
+  `~-.  \     /  .-~'
+      `-.\   /.-'
+         (o o)
+          ) (
+         /   \
+        '     `
+```
+
+**A little desktop moth, drawn to your Claude usage.**
+
+Moth is a small always-on-top card that shows your real Claude Code usage — the
 5-hour window and the weekly window — so you never have to open `/usage` again.
+Like its namesake, it lives beside the light: the more you burn, the warmer it glows.
 
 The numbers come straight from Claude Code's own official usage feed, so they match
 the `/usage` screen. Nothing is sent anywhere; everything runs on this PC.
@@ -15,20 +32,31 @@ the `/usage` screen. Nothing is sent anywhere; everything runs on this PC.
    powershell -ExecutionPolicy Bypass -File install.ps1
    ```
 
-That's it. The widget appears in the top-left of your desktop (drag it wherever you
-like — it remembers). From now on it also starts automatically when you log in.
+That's it. Moth appears in the top-left of your desktop (drag it wherever you like —
+it remembers). It launches automatically whenever a Claude Code session is active,
+and you can bring it back any time by typing **`/moth`** in Claude Code.
 
 The bars fill in the moment your **next** Claude Code session makes its first request.
-Until then it shows "waiting for first Claude session…".
+Until then it shows "waiting for Claude usage data…".
+
+> Prefer it to start when you log into Windows instead? Run
+> `install.ps1 -AutoStart`. By default Moth only launches with Claude.
 
 ## What the bars mean
 
-- **5-hour** — how much of your rolling 5-hour allowance you've used, and when it resets.
+- **5-hour** — how much of your rolling 5-hour allowance you've used, and when it
+  resets. The tiny hourglass beside the reset time turns as the window burns down.
 - **Weekly** — same, for the 7-day window.
-- Bars turn **amber** past 70% and **red** past 90%.
-- "updated Nm ago" tells you how fresh the numbers are. The widget refreshes while
-  you're using Claude Code; when you're idle it dims slightly and keeps counting down
-  the reset timers. (That's expected — usage only changes while you're working.)
+- The glow tells the story: **warm amber** normally, **deep orange** past 70%,
+  **red** past 90% — the flame rising as you get close to the limit.
+- "updated Nm ago" tells you how fresh the numbers are. Moth refreshes while you're
+  using Claude Code; when you're idle it dims slightly and keeps counting down the
+  reset timers. (That's expected — usage only changes while you're working.)
+
+## The `/moth` command
+
+Closed the widget? Type `/moth` in any Claude Code session and it restarts —
+same position, fresh numbers.
 
 ## Turn it off / remove it
 
@@ -36,18 +64,21 @@ Until then it shows "waiting for first Claude session…".
 powershell -ExecutionPolicy Bypass -File uninstall.ps1
 ```
 
-This closes the widget, stops it starting on login, and removes its status-line entry
-from your Claude settings. Everything else is left untouched. To hide it just for now,
-click the small **×** in its top-right corner.
+This closes the widget, removes the `/moth` command, removes any login auto-start,
+and removes its status-line entry from your Claude settings. Everything else is left
+untouched. To hide it just for now, click the small **×** in its top-right corner.
 
 ## Files
 
 | File | What it does |
 |------|--------------|
 | `install.ps1` / `uninstall.ps1` | one-time setup / removal |
-| `capture-usage.ps1` | saves your latest usage whenever a Claude session is active |
-| `widget.ps1` | the floating bar itself |
+| `capture-usage.ps1` | saves your latest usage whenever a Claude session is active (also relaunches Moth if it's not running) |
+| `widget.ps1` | the moth itself |
+| `restart-widget.ps1` | what `/moth` runs — stop + relaunch |
+| `commands/moth.md.tmpl` | template for the `/moth` command install |
 | `launch-widget.vbs` | starts the widget with no console window |
+| `assets/moth-logo.svg` | the Moth mark |
 | `config.json` | refresh rate, "stale" threshold, bar width, default position — edit if you like |
 | `usage-cache.json` | the latest saved numbers (created automatically) |
 | `window-state.json` | remembers where you dragged the widget (created automatically) |
@@ -65,17 +96,20 @@ click the small **×** in its top-right corner.
 
 ## What install does (full disclosure)
 
-`install.ps1` makes exactly two changes and backs up your settings first:
+`install.ps1` makes exactly two changes by default and backs up your settings first:
 
 - Adds a `statusLine` entry to `~/.claude/settings.json` (your pre-install file is saved once to
   `settings.json.usage-widget.bak`). If you already had a custom status line, it warns you before
   replacing it — and uninstall leaves a status line alone if it's no longer this widget's.
-- Adds a **login auto-start**: a Startup shortcut that runs the widget **hidden**
-  (`-WindowStyle Hidden`) with **`-ExecutionPolicy Bypass`**, from this folder. That's a normal
-  way to run a personal script on login, but you should know it's happening — and keep this
-  folder somewhere only you can write to, so nobody can swap `widget.ps1` out from under it.
+- Adds a `/moth` command file at `~/.claude/commands/moth.md` so you can restart the
+  widget from inside Claude Code.
 
-`uninstall.ps1` reverses both cleanly.
+Optionally (only with `-AutoStart`): a Startup shortcut that runs the widget **hidden**
+(`-WindowStyle Hidden`) with **`-ExecutionPolicy Bypass`**, from this folder. That's a normal
+way to run a personal script on login, but you should know it's happening — and keep this
+folder somewhere only you can write to, so nobody can swap `widget.ps1` out from under it.
+
+`uninstall.ps1` reverses all of it cleanly.
 
 ## Privacy
 
@@ -96,3 +130,15 @@ at any time. The widget never runs its own login, never logs or transmits the to
 except to Anthropic, backs off politely on errors, and degrades to the official two-bar
 display if the endpoint fails. If any of that makes you uncomfortable, leave it off — the
 default mode is fully within documented behavior.
+
+```text
+       *
+
+  .~\     /~.
+  \  \   /  /
+   `-.\ /.-'
+     (o o)
+      ) (
+     '   `
+```
+<p align="center"><em>drawn to the light</em></p>
