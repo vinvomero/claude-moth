@@ -22,12 +22,26 @@ The numbers come straight from Claude Code's own official usage feed, so they ma
 
 ## Setup (one time)
 
-1. Open PowerShell in this folder.
-2. Run:
+> **Just have the link?** Paste this whole repo URL to Claude Code and say *"install
+> this for me"* — it can run every step below for you. Or do it yourself:
 
-   ```powershell
-   powershell -ExecutionPolicy Bypass -File install.ps1
-   ```
+**1. Get Moth onto your PC.** In PowerShell, clone it to a folder you'll keep
+(Moth registers this location with Claude Code, so don't put it somewhere temporary
+like Downloads):
+
+```powershell
+git clone https://github.com/vinvomero/claude-moth.git
+cd claude-moth
+```
+
+*No git?* On the GitHub page click **Code ▸ Download ZIP**, extract it somewhere
+permanent, then open PowerShell in that folder.
+
+**2. Install:**
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install.ps1
+```
 
 That's it. Moth appears in the top-left of your desktop (drag it wherever you like —
 it remembers). It launches automatically whenever a Claude Code session is active,
