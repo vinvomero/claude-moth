@@ -98,8 +98,7 @@ def pct(bucket):
     except (TypeError, ValueError):
         return None
 
-def resets(bucket):
-    v = (data.get(bucket) or {}).get("resets_at")
+def parse_ts(v):
     if v is None:
         return None
     try:
@@ -113,18 +112,25 @@ def resets(bucket):
     except Exception:
         return None
 
+def resets(bucket):
+    return parse_ts((data.get(bucket) or {}).get("resets_at"))
+
 def remaining(epoch):
     if epoch is None:
         return ""
     s = int(epoch - time.time())
     if s <= 0:
         return "resetting…"
+    import datetime
+    # local wall-clock; lstrip("0") drops the leading zero portably ("%-I" is glibc-only)
+    clock = datetime.datetime.fromtimestamp(epoch).strftime("%I:%M %p").lstrip("0")
     d, s = divmod(s, 86400)
     h, s = divmod(s, 3600)
     m = s // 60
-    if d: return f"resets in {d}d {h}h"
-    if h: return f"resets in {h}h {m}m"
-    return f"resets in {m}m"
+    if d: cd = f"in {d}d {h}h"
+    elif h: cd = f"in {h}h {m}m"
+    else: cd = f"in {m}m"
+    return f"resets {clock} · {cd}"
 
 def color_for(p):
     if p is None: return MUTED
@@ -156,17 +162,27 @@ try:
         line(f"Weekly   {round(p7)}%", color=color_for(p7))
         if r7: line(remaining(r7), color=DIM, size="11")
 
-    # Optional per-model weekly bucket, shown when present. Same preference order as
-    # the Windows widget so both platforms surface the same bucket.
-    for key in ("seven_day_fable", "seven_day_opus", "seven_day_sonnet"):
-        b = data.get(key)
-        if b and b.get("utilization") is not None:
-            pm = pct(key)
-            if pm is None:
-                continue
-            label = key.replace("seven_day_", "").capitalize()
+    # Per-model weekly bar: read the scoped-weekly limit from limits[] (the top-level
+    # seven_day_<model> fields are null on Max plans). Prefer the active scoped limit;
+    # it labels itself by whichever model it currently tracks (Fable, Opus, ...).
+    scoped = None
+    for lim in (data.get("limits") or []):
+        try:
+            model = (lim.get("scope") or {}).get("model") or {}
+            if lim.get("group") == "weekly" and model.get("display_name"):
+                if scoped is None or lim.get("is_active"):
+                    scoped = lim
+        except AttributeError:
+            continue
+    if scoped is not None:
+        try:
+            pm = max(0.0, min(100.0, float(scoped.get("percent"))))
+            label = scoped["scope"]["model"]["display_name"]
             line(f"{label} (weekly)   {round(pm)}%", color=color_for(pm))
-            break
+            rm = parse_ts(scoped.get("resets_at"))
+            if rm: line(remaining(rm), color=DIM, size="11")
+        except (TypeError, ValueError):
+            pass
 
     print("---")
     line("Refresh", refresh="true")

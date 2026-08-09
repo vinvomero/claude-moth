@@ -172,12 +172,17 @@ function Format-Remaining([long]$resetAt) {
     $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     $s = [long]$resetAt - $now
     if ($s -le 0) { return 'resetting...' }
+    # Wall-clock reset time in the user's local zone, locale-aware short time (12h/24h
+    # follows the OS setting). '·' built via [char] so PS 5.1 file-encoding can't mangle it.
+    $clock = [DateTimeOffset]::FromUnixTimeSeconds($resetAt).ToLocalTime().ToString('t')
+    $sep = [char]0x00B7
     $d = [math]::Floor($s / 86400); $s -= $d*86400
     $h = [math]::Floor($s / 3600);  $s -= $h*3600
     $m = [math]::Floor($s / 60)
-    if ($d -gt 0) { return ("resets in {0}d {1}h" -f $d, $h) }
-    if ($h -gt 0) { return ("resets in {0}h {1}m" -f $h, $m) }
-    return ("resets in {0}m" -f $m)
+    $countdown = if ($d -gt 0) { "in {0}d {1}h" -f $d, $h }
+                 elseif ($h -gt 0) { "in {0}h {1}m" -f $h, $m }
+                 else { "in {0}m" -f $m }
+    return ("resets {0} {1} {2}" -f $clock, $sep, $countdown)
 }
 
 $script:cache = $null
@@ -427,11 +432,17 @@ function Invoke-EndpointPoll {
         $p7 = ConvertTo-PctScale $resp.seven_day.utilization
         $r7 = ConvertTo-Epoch    $resp.seven_day.resets_at
 
-        # Discover the per-model weekly bucket at runtime (seven_day_fable /
-        # seven_day_opus / ...) rather than hardcoding a model name.
-        $modelKey = $null
-        foreach ($pref in @('seven_day_fable','seven_day_opus','seven_day_sonnet')) {
-            if ($resp.PSObject.Properties.Name -contains $pref -and $resp.$pref) { $modelKey = $pref; break }
+        # Per-model weekly usage lives in limits[] as a `weekly_scoped` entry
+        # (scope.model.display_name), NOT in a top-level seven_day_<model> field - those
+        # are null on Max plans. Pick the active scoped-weekly limit; it labels itself by
+        # whichever model the scoped limit currently tracks (Fable, Opus, ...).
+        $scoped = $null
+        if ($resp.limits) {
+            $scoped = @($resp.limits | Where-Object {
+                $_.group -eq 'weekly' -and $_.scope -and $_.scope.model -and $_.scope.model.display_name
+            } | Sort-Object -Property @{ Expression = { [bool]$_.is_active }; Descending = $true } |
+                Select-Object -First 1)
+            if ($scoped.Count) { $scoped = $scoped[0] } else { $scoped = $null }
         }
 
         if ($null -ne $p5 -and $null -ne $r5 -and $null -ne $p7 -and $null -ne $r7) {
@@ -439,14 +450,13 @@ function Invoke-EndpointPoll {
                 five_hour   = [ordered]@{ used_percentage = $p5; resets_at = $r5 }
                 seven_day   = [ordered]@{ used_percentage = $p7; resets_at = $r7 }
             }
-            if ($modelKey) {
-                $pm = ConvertTo-PctScale $resp.$modelKey.utilization
+            if ($scoped) {
+                $pm = ConvertTo-PctScale $scoped.percent
                 if ($null -ne $pm) {
-                    $label = (Get-Culture).TextInfo.ToTitleCase(($modelKey -replace '^seven_day_',''))
                     $obj.fable = [ordered]@{
                         used_percentage = $pm
-                        resets_at       = ConvertTo-Epoch $resp.$modelKey.resets_at
-                        label           = $label
+                        resets_at       = ConvertTo-Epoch $scoped.resets_at
+                        label           = [string]$scoped.scope.model.display_name
                         captured_at     = [long][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
                     }
                 }
