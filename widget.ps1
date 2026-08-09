@@ -62,9 +62,11 @@ foreach ($k in @($defaults.Keys)) {
 $cfg.poll_seconds  = [math]::Max(1, $cfg.poll_seconds)
 $cfg.stale_minutes = [math]::Max(1, $cfg.stale_minutes)
 $cfg.track_width   = [math]::Min(2000, [math]::Max(50, $cfg.track_width))
-$cfg.scale         = [math]::Min(2.5, [math]::Max(0.6, $cfg.scale))   # drag-resize band
-$TRACK = [double]$cfg.track_width
+# One source of truth for the drag-resize band - used here to clamp the startup value AND
+# in the grip drag handler, so they can never diverge.
 $SCALE_MIN = 0.6; $SCALE_MAX = 2.5
+$cfg.scale         = [math]::Min($SCALE_MAX, [math]::Max($SCALE_MIN, $cfg.scale))
+$TRACK = [double]$cfg.track_width
 
 $xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -191,17 +193,20 @@ function Format-Remaining([long]$resetAt) {
     $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     $s = [long]$resetAt - $now
     if ($s -le 0) { return 'resetting...' }
-    # Wall-clock reset time in the user's local zone, locale-aware short time (12h/24h
-    # follows the OS setting). '·' built via [char] so PS 5.1 file-encoding can't mangle it.
-    $clock = [DateTimeOffset]::FromUnixTimeSeconds($resetAt).ToLocalTime().ToString('t')
-    $sep = [char]0x00B7
     $d = [math]::Floor($s / 86400); $s -= $d*86400
     $h = [math]::Floor($s / 3600);  $s -= $h*3600
     $m = [math]::Floor($s / 60)
     $countdown = if ($d -gt 0) { "in {0}d {1}h" -f $d, $h }
                  elseif ($h -gt 0) { "in {0}h {1}m" -f $h, $m }
                  else { "in {0}m" -f $m }
-    return ("resets {0} {1} {2}" -f $clock, $sep, $countdown)
+    # Wall-clock reset time in the user's local zone, locale-aware short time (12h/24h
+    # follows the OS setting). '·' via [char] so PS 5.1 file-encoding can't mangle it.
+    # FromUnixTimeSeconds THROWS for out-of-range epochs (e.g. a ms-sized value) - guard
+    # it so a bad cache value degrades to the countdown instead of crash-looping the widget.
+    $clock = $null
+    try { $clock = [DateTimeOffset]::FromUnixTimeSeconds([long]$resetAt).ToLocalTime().ToString('t') } catch { }
+    if ($clock) { return ("resets {0} {1} {2}" -f $clock, ([char]0x00B7), $countdown) }
+    return ("resets {0}" -f $countdown)
 }
 
 $script:cache = $null
@@ -229,6 +234,12 @@ function Read-Cache {
         if (-not (Test-Numeric $c.$b.resets_at)) { return $null }
     }
     if (-not (Test-Numeric $c.captured_at)) { return $null }
+    # The per-model (fable) bucket is OPTIONAL - so a bad one drops just that bar rather
+    # than sinking the whole cache. Without this, a non-numeric hand-edit crashes the
+    # render path (the one place that bypasses the numeric guard above).
+    if ($c.fable -and (-not (Test-Numeric $c.fable.used_percentage) -or -not (Test-Numeric $c.fable.resets_at))) {
+        $c.PSObject.Properties.Remove('fable')
+    }
     return $c
 }
 
@@ -374,11 +385,32 @@ function ConvertTo-Epoch($v) {
     # InvariantCulture (locale-proof, same reason as the statusLine parser).
     $l = [long]0
     if ([long]::TryParse([string]$v, [System.Globalization.NumberStyles]::Integer,
-            [System.Globalization.CultureInfo]::InvariantCulture, [ref]$l)) { return $l }
+            [System.Globalization.CultureInfo]::InvariantCulture, [ref]$l)) {
+        # Normalize epoch-MILLIS to seconds: anything past ~year 5138 (1e11 s) is almost
+        # certainly milliseconds, and FromUnixTimeSeconds would throw on it downstream.
+        if ($l -gt 100000000000) { $l = [long]($l / 1000) }
+        return $l
+    }
     $dto = [DateTimeOffset]::MinValue
     if ([DateTimeOffset]::TryParse([string]$v, [System.Globalization.CultureInfo]::InvariantCulture,
             [System.Globalization.DateTimeStyles]::None, [ref]$dto)) { return [long]$dto.ToUnixTimeSeconds() }
     return $null
+}
+
+function Select-ScopedWeekly($limits) {
+    # Pure, fixture-testable pick of the per-model weekly-scoped limit from limits[].
+    # DETERMINISTIC tie-break (active, then highest percent, then model name) so Windows,
+    # Mac, and repeated calls all pick the same model even if several are active - PS 5.1
+    # Sort-Object isn't a stable sort, so we can't lean on input order.
+    if (-not $limits) { return $null }
+    $cands = @($limits | Where-Object {
+        $_.group -eq 'weekly' -and $_.scope -and $_.scope.model -and $_.scope.model.display_name })
+    if (-not $cands.Count) { return $null }
+    $cands | Sort-Object `
+        @{ Expression = { [int][bool]$_.is_active };            Descending = $true }, `
+        @{ Expression = { [double]($_.percent -as [double]) };  Descending = $true }, `
+        @{ Expression = { [string]$_.scope.model.display_name }; Descending = $false } |
+        Select-Object -First 1
 }
 
 function Invoke-TokenNudge {
@@ -456,24 +488,22 @@ function Invoke-EndpointPoll {
 
         # Per-model weekly usage lives in limits[] as a `weekly_scoped` entry
         # (scope.model.display_name), NOT in a top-level seven_day_<model> field - those
-        # are null on Max plans. Pick the active scoped-weekly limit; it labels itself by
-        # whichever model the scoped limit currently tracks (Fable, Opus, ...).
-        $scoped = $null
-        if ($resp.limits) {
-            $scoped = @($resp.limits | Where-Object {
-                $_.group -eq 'weekly' -and $_.scope -and $_.scope.model -and $_.scope.model.display_name
-            } | Sort-Object -Property @{ Expression = { [bool]$_.is_active }; Descending = $true } |
-                Select-Object -First 1)
-            if ($scoped.Count) { $scoped = $scoped[0] } else { $scoped = $null }
-        }
+        # are null on Max plans. The `fable` cache key is a legacy name; it now holds
+        # whichever model the scoped weekly limit currently tracks (Fable, Opus, ...).
+        $scoped = Select-ScopedWeekly $resp.limits
 
         if ($null -ne $p5 -and $null -ne $r5 -and $null -ne $p7 -and $null -ne $r7) {
             $obj = [ordered]@{
                 five_hour   = [ordered]@{ used_percentage = $p5; resets_at = $r5 }
                 seven_day   = [ordered]@{ used_percentage = $p7; resets_at = $r7 }
             }
-            if ($scoped) {
-                $pm = ConvertTo-PctScale $scoped.percent
+            # Populate the per-model bar in its OWN try - a shape surprise from this
+            # undocumented array must drop just this bar, never discard the good
+            # five_hour/seven_day data for the whole tick.
+            try {
+              if ($scoped) {
+                $rawPct = if ($null -ne $scoped.percent) { $scoped.percent } else { $scoped.utilization }
+                $pm = ConvertTo-PctScale $rawPct
                 if ($null -ne $pm) {
                     $obj.fable = [ordered]@{
                         used_percentage = $pm
@@ -482,7 +512,8 @@ function Invoke-EndpointPoll {
                         captured_at     = [long][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
                     }
                 }
-            }
+              }
+            } catch { Write-ErrorLog ("live_sync: per-model bar skipped - " + $_.Exception.Message) }
             $obj.captured_at = [long][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
             $json = [pscustomobject]$obj | ConvertTo-Json -Depth 5
             $tmp = "$cacheFile.$PID.tmp"   # per-writer name so it never collides with the statusLine capture's temp
@@ -529,28 +560,45 @@ $win.Add_MouseLeftButtonDown({ try { $win.DragMove() } catch { } })
 # resize, not move. The cursor is tracked in ABSOLUTE SCREEN pixels so the math is immune
 # to the window resizing/repositioning under the pointer mid-drag. Uniform scale keeps the
 # card's aspect; SizeToContent refits the window; the size persists on release.
+# Every handler is wrapped: an unhandled exception in a WPF event handler propagates to
+# the dispatcher and, via the outer catch, would take the whole widget down.
 $script:resizing = $false
 $ResizeGrip.Add_MouseLeftButtonDown({
-    $_.Handled = $true
-    $script:resizing = $true
-    $script:resizeOrigin = [System.Windows.Forms.Cursor]::Position
-    $script:resizeStartScale = [double]$CardScale.ScaleX
-    [void]$ResizeGrip.CaptureMouse()
+    try {
+        $_.Handled = $true
+        $script:resizeOrigin = [System.Windows.Forms.Cursor]::Position
+        $script:resizeStartScale = [double]$CardScale.ScaleX
+        # Only enter resize mode if capture actually took - otherwise a drag off the tiny
+        # grip would never see the MouseUp and we'd get stuck resizing.
+        $script:resizing = [bool]$ResizeGrip.CaptureMouse()
+    } catch { $script:resizing = $false }
 })
 $ResizeGrip.Add_MouseMove({
-    if (-not $script:resizing) { return }
-    $p = [System.Windows.Forms.Cursor]::Position
-    $delta = ($p.X - $script:resizeOrigin.X) + ($p.Y - $script:resizeOrigin.Y)
-    $s = $script:resizeStartScale + ($delta / 220.0)
-    $s = [math]::Max($SCALE_MIN, [math]::Min($SCALE_MAX, $s))
-    $CardScale.ScaleX = $s; $CardScale.ScaleY = $s
+    try {
+        # Self-heal: if the button isn't actually down (lost capture, click elsewhere
+        # mid-drag), stop - never rescale on a bare hover over the grip.
+        if (-not $script:resizing) { return }
+        if ($_.LeftButton -ne [System.Windows.Input.MouseButtonState]::Pressed) { $script:resizing = $false; return }
+        $p = [System.Windows.Forms.Cursor]::Position
+        $delta = ($p.X - $script:resizeOrigin.X) + ($p.Y - $script:resizeOrigin.Y)
+        $s = $script:resizeStartScale + ($delta / 220.0)
+        $s = [math]::Max($SCALE_MIN, [math]::Min($SCALE_MAX, $s))
+        $CardScale.ScaleX = $s; $CardScale.ScaleY = $s
+    } catch { $script:resizing = $false }
 })
 $ResizeGrip.Add_MouseLeftButtonUp({
-    if (-not $script:resizing) { return }
-    $_.Handled = $true
-    $script:resizing = $false
-    $ResizeGrip.ReleaseMouseCapture()
-    Save-WindowState   # persist the new size
+    try {
+        if (-not $script:resizing) { return }
+        $_.Handled = $true
+        $script:resizing = $false
+        $ResizeGrip.ReleaseMouseCapture()
+        Save-WindowState   # persist the new size
+    } catch { }
+})
+# WPF capture is app-scoped: clicking another window mid-drag fires LostMouseCapture with
+# no MouseUp. Reset the flag (and persist) so the widget never gets stuck resizing.
+$ResizeGrip.Add_LostMouseCapture({
+    if ($script:resizing) { $script:resizing = $false; try { Save-WindowState } catch { } }
 })
 
 $win.Add_Closing({
@@ -578,8 +626,11 @@ if ($SelfTest -or $Screenshot) {
     elseif ($Screenshot -and (Test-Path $cacheFile)) { $script:cache = (Get-Content $cacheFile -Raw | ConvertFrom-Json) }
     Update-Display
     if ($SelfTest) {
-        Write-Output ("SELFTEST OK | Pct5={0} Fill5W={1} Reset5='{2}' | Pct7={3} Fill7W={4} Reset7='{5}' | {6} | Opacity={7}" -f `
-            $Pct5.Text, [math]::Round($Fill5.Width,1), $Reset5.Text, $Pct7.Text, [math]::Round($Fill7.Width,1), $Reset7.Text, $Updated.Text, $Card.Opacity)
+        $fableDump = if ($FableGroup.Visibility -eq [Windows.Visibility]::Visible) {
+            "Fable[vis {0}='{1}' {2} reset='{3}']" -f $PctF.Text, $FableLabel.Text, [math]::Round($FillF.Width,1), $ResetF.Text
+        } else { "Fable[collapsed]" }
+        Write-Output ("SELFTEST OK | Pct5={0} Fill5W={1} Reset5='{2}' | Pct7={3} Fill7W={4} Reset7='{5}' | {6} | Scale={7} | Opacity={8} | {9}" -f `
+            $Pct5.Text, [math]::Round($Fill5.Width,1), $Reset5.Text, $Pct7.Text, [math]::Round($Fill7.Width,1), $Reset7.Text, $Updated.Text, [math]::Round($CardScale.ScaleX,2), $Card.Opacity, $fableDump)
     }
     if ($Screenshot) {
         $Card.Opacity = 1.0

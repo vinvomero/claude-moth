@@ -163,20 +163,30 @@ try:
         if r7: line(remaining(r7), color=DIM, size="11")
 
     # Per-model weekly bar: read the scoped-weekly limit from limits[] (the top-level
-    # seven_day_<model> fields are null on Max plans). Prefer the active scoped limit;
-    # it labels itself by whichever model it currently tracks (Fable, Opus, ...).
-    scoped = None
+    # seven_day_<model> fields are null on Max plans). DETERMINISTIC tie-break (active,
+    # then highest percent, then model name) matches the Windows widget so both platforms
+    # pick the same model even if several are active.
+    def _scored(lim):
+        model = (lim.get("scope") or {}).get("model") or {}
+        if lim.get("group") != "weekly" or not model.get("display_name"):
+            return None
+        try: pct_v = float(lim.get("percent") if lim.get("percent") is not None else lim.get("utilization"))
+        except (TypeError, ValueError): pct_v = -1.0
+        return (1 if lim.get("is_active") else 0, pct_v, model["display_name"])
+    cands = []
     for lim in (data.get("limits") or []):
         try:
-            model = (lim.get("scope") or {}).get("model") or {}
-            if lim.get("group") == "weekly" and model.get("display_name"):
-                if scoped is None or lim.get("is_active"):
-                    scoped = lim
+            s = _scored(lim)
+            if s is not None: cands.append((s, lim))
         except AttributeError:
             continue
-    if scoped is not None:
+    if cands:
+        # sort by (active, percent) desc, then name asc for a stable, cross-platform pick
+        cands.sort(key=lambda t: (-t[0][0], -t[0][1], t[0][2]))
+        scoped = cands[0][1]
         try:
-            pm = max(0.0, min(100.0, float(scoped.get("percent"))))
+            raw = scoped.get("percent") if scoped.get("percent") is not None else scoped.get("utilization")
+            pm = max(0.0, min(100.0, float(raw)))
             label = scoped["scope"]["model"]["display_name"]
             line(f"{label} (weekly)   {round(pm)}%", color=color_for(pm))
             rm = parse_ts(scoped.get("resets_at"))
