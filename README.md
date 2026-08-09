@@ -50,6 +50,10 @@ and you can bring it back any time by typing **`/moth`** in Claude Code.
 The bars fill in the moment your **next** Claude Code session makes its first request.
 Until then it shows "waiting for Claude usage data…".
 
+**Resize it** by dragging the little grip in its **bottom-right corner** — Moth scales up
+or down to fit your screen and stays that size. (You can also set a starting `scale` in
+`config.json`.)
+
 > Prefer it to start when you log into Windows instead? Run
 > `install.ps1 -AutoStart`. By default Moth only launches with Claude.
 

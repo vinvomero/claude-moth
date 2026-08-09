@@ -9,6 +9,7 @@ param([string]$SelfTest, [string]$Screenshot)
 #   -Screenshot <out.png>            render the card to a PNG (uses the live cache)
 
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
+Add-Type -AssemblyName System.Windows.Forms   # Cursor::Position (absolute screen px) for drag-resize
 
 $root      = $PSScriptRoot
 $cacheFile = Join-Path $root 'usage-cache.json'
@@ -27,7 +28,7 @@ function Write-ErrorLog($msg) {
 }
 
 # ---- config (shipped defaults; user-editable) + window state (runtime; gitignored) ----
-$defaults = @{ poll_seconds = 20; stale_minutes = 30; window_left = 60; window_top = 60; track_width = 220 }
+$defaults = @{ poll_seconds = 20; stale_minutes = 30; window_left = 60; window_top = 60; track_width = 220; scale = 1.0 }
 $cfg = @{}; foreach ($k in @($defaults.Keys)) { $cfg[$k] = $defaults[$k] }
 if (Test-Path $cfgFile) {
     try { (Get-Content $cfgFile -Raw | ConvertFrom-Json).psobject.Properties | ForEach-Object { $cfg[$_.Name] = $_.Value } } catch { }
@@ -39,6 +40,7 @@ if (Test-Path $stateFile) {
         $st = Get-Content $stateFile -Raw | ConvertFrom-Json
         if ($null -ne $st.window_left) { $cfg.window_left = $st.window_left }
         if ($null -ne $st.window_top)  { $cfg.window_top  = $st.window_top }
+        if ($null -ne $st.scale)       { $cfg.scale       = $st.scale }
         # live_sync is the current name; fable_bar is the old one, still honored.
         if ($null -ne $st.live_sync)   { $cfg.live_sync   = $st.live_sync }
         elseif ($null -ne $st.fable_bar) { $cfg.live_sync = $st.fable_bar }
@@ -60,7 +62,9 @@ foreach ($k in @($defaults.Keys)) {
 $cfg.poll_seconds  = [math]::Max(1, $cfg.poll_seconds)
 $cfg.stale_minutes = [math]::Max(1, $cfg.stale_minutes)
 $cfg.track_width   = [math]::Min(2000, [math]::Max(50, $cfg.track_width))
+$cfg.scale         = [math]::Min(2.5, [math]::Max(0.6, $cfg.scale))   # drag-resize band
 $TRACK = [double]$cfg.track_width
+$SCALE_MIN = 0.6; $SCALE_MAX = 2.5
 
 $xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -68,7 +72,9 @@ $xaml = @"
         WindowStyle="None" AllowsTransparency="True" Background="Transparent"
         Topmost="True" ResizeMode="NoResize" ShowInTaskbar="False"
         SizeToContent="WidthAndHeight" Title="Moth">
-  <Border x:Name="Card" CornerRadius="14" Background="#FB0B0D14" BorderBrush="#1A1E2E" BorderThickness="1" Padding="16,12,16,12">
+  <Grid>
+    <Border x:Name="Card" CornerRadius="14" Background="#FB0B0D14" BorderBrush="#1A1E2E" BorderThickness="1" Padding="16,12,16,12">
+    <Border.LayoutTransform><ScaleTransform x:Name="CardScale" ScaleX="1" ScaleY="1"/></Border.LayoutTransform>
     <Border.Effect><DropShadowEffect BlurRadius="26" ShadowDepth="0" Opacity="0.18" Color="#FFB65C"/></Border.Effect>
     <StackPanel>
       <Grid x:Name="TitleBar" Margin="0,0,0,10">
@@ -137,7 +143,16 @@ $xaml = @"
       <TextBlock x:Name="Updated" Text="waiting for Claude usage data..." Foreground="#6E6552"
                  FontFamily="Segoe UI" FontSize="11" HorizontalAlignment="Left"/>
     </StackPanel>
-  </Border>
+    </Border>
+    <!-- Corner resize grip: sibling of the card so it stays a constant size while the
+         card scales. Drag it to resize the whole widget. -->
+    <Border x:Name="ResizeGrip" Width="16" Height="16" Margin="0,0,4,4"
+            HorizontalAlignment="Right" VerticalAlignment="Bottom"
+            Background="Transparent" Cursor="SizeNWSE" ToolTip="Drag to resize">
+      <Path Stroke="#7A6E55" StrokeThickness="1.4" SnapsToDevicePixels="True"
+            Data="M 14,7 L 7,14 M 14,11 L 11,14"/>
+    </Border>
+  </Grid>
 </Window>
 "@
 
@@ -157,6 +172,10 @@ $Pct7    = $win.FindName('Pct7');  $Fill7 = $win.FindName('Fill7');  $Reset7 = $
 $FableGroup = $win.FindName('FableGroup'); $FableLabel = $win.FindName('FableLabel')
 $PctF    = $win.FindName('PctF');  $FillF = $win.FindName('FillF');  $ResetF = $win.FindName('ResetF')
 $Updated = $win.FindName('Updated')
+$CardScale = $win.FindName('CardScale'); $ResizeGrip = $win.FindName('ResizeGrip')
+# Apply the saved/default size before the window is shown (SizeToContent fits the window
+# to the scaled card).
+$CardScale.ScaleX = [double]$cfg.scale; $CardScale.ScaleY = [double]$cfg.scale
 
 $win.Left = [double]$cfg.window_left
 $win.Top  = [double]$cfg.window_top
@@ -222,7 +241,9 @@ function Save-WindowState {
     # (a minimized window reports a bogus off-screen position we must not persist).
     try {
         if ($null -eq $win -or $win.WindowState -ne [Windows.WindowState]::Normal) { return }
-        $key = '{0},{1}' -f [int]$win.Left, [int]$win.Top
+        $sc = if ($CardScale) { [math]::Round([double]$CardScale.ScaleX, 3) } else { 1.0 }
+        # Key includes scale so a pure resize (no move) still triggers a write.
+        $key = '{0},{1},{2}' -f [int]$win.Left, [int]$win.Top, $sc
         if ($key -eq $script:lastSavedPos) { return }
         $st = @{}
         if (Test-Path $stateFile) {
@@ -230,6 +251,7 @@ function Save-WindowState {
         }
         $st.window_left = [int]$win.Left
         $st.window_top  = [int]$win.Top
+        $st.scale       = $sc
         Write-Utf8NoBom $stateFile ([pscustomobject]$st | ConvertTo-Json)
         $script:lastSavedPos = $key
     } catch { }
@@ -502,6 +524,35 @@ $CloseBtn.Add_MouseLeftButtonDown({ $_.Handled = $true; $script:userClosed = $tr
 # DragMove throws if the button was already released - ignore that.
 $win.Add_MouseLeftButtonDown({ try { $win.DragMove() } catch { } })
 
+# ---- drag-to-resize (corner grip) ----
+# The grip's press is marked Handled so the window-level DragMove never fires - this is
+# resize, not move. The cursor is tracked in ABSOLUTE SCREEN pixels so the math is immune
+# to the window resizing/repositioning under the pointer mid-drag. Uniform scale keeps the
+# card's aspect; SizeToContent refits the window; the size persists on release.
+$script:resizing = $false
+$ResizeGrip.Add_MouseLeftButtonDown({
+    $_.Handled = $true
+    $script:resizing = $true
+    $script:resizeOrigin = [System.Windows.Forms.Cursor]::Position
+    $script:resizeStartScale = [double]$CardScale.ScaleX
+    [void]$ResizeGrip.CaptureMouse()
+})
+$ResizeGrip.Add_MouseMove({
+    if (-not $script:resizing) { return }
+    $p = [System.Windows.Forms.Cursor]::Position
+    $delta = ($p.X - $script:resizeOrigin.X) + ($p.Y - $script:resizeOrigin.Y)
+    $s = $script:resizeStartScale + ($delta / 220.0)
+    $s = [math]::Max($SCALE_MIN, [math]::Min($SCALE_MAX, $s))
+    $CardScale.ScaleX = $s; $CardScale.ScaleY = $s
+})
+$ResizeGrip.Add_MouseLeftButtonUp({
+    if (-not $script:resizing) { return }
+    $_.Handled = $true
+    $script:resizing = $false
+    $ResizeGrip.ReleaseMouseCapture()
+    Save-WindowState   # persist the new size
+})
+
 $win.Add_Closing({
     Save-WindowState
     # Only the x button sets $userClosed, so a forceful kill (/moth, install restart)
@@ -532,13 +583,18 @@ if ($SelfTest -or $Screenshot) {
     }
     if ($Screenshot) {
         $Card.Opacity = 1.0
-        $win.Content = $null   # un-parent so we can render the card standalone
-        $Card.Measure([Windows.Size]::new([double]::PositiveInfinity, [double]::PositiveInfinity))
-        $Card.Arrange([Windows.Rect]::new(0, 0, $Card.DesiredSize.Width, $Card.DesiredSize.Height))
-        $Card.UpdateLayout()
-        $w = [int][math]::Ceiling($Card.ActualWidth); $h = [int][math]::Ceiling($Card.ActualHeight)
+        $ResizeGrip.Visibility = [Windows.Visibility]::Collapsed   # hide the grip in the shot
+        # Render the Grid (the window's content, holding the scaled card). Detach it from
+        # the window so it becomes a parentless root we can Measure/Arrange standalone -
+        # the visual tree isn't built until the window is shown, which -Screenshot never does.
+        $rootEl = $win.Content
+        $win.Content = $null
+        $rootEl.Measure([Windows.Size]::new([double]::PositiveInfinity, [double]::PositiveInfinity))
+        $rootEl.Arrange([Windows.Rect]::new(0, 0, $rootEl.DesiredSize.Width, $rootEl.DesiredSize.Height))
+        $rootEl.UpdateLayout()
+        $w = [int][math]::Ceiling($rootEl.ActualWidth); $h = [int][math]::Ceiling($rootEl.ActualHeight)
         $rtb = New-Object Windows.Media.Imaging.RenderTargetBitmap($w, $h, 96, 96, [Windows.Media.PixelFormats]::Pbgra32)
-        $rtb.Render($Card)
+        $rtb.Render($rootEl)
         $enc = New-Object Windows.Media.Imaging.PngBitmapEncoder
         $enc.Frames.Add([Windows.Media.Imaging.BitmapFrame]::Create($rtb))
         $fs = [IO.File]::Create($Screenshot); $enc.Save($fs); $fs.Close()
