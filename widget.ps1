@@ -28,7 +28,7 @@ function Write-ErrorLog($msg) {
 }
 
 # ---- config (shipped defaults; user-editable) + window state (runtime; gitignored) ----
-$defaults = @{ poll_seconds = 20; stale_minutes = 30; window_left = 60; window_top = 60; track_width = 220; scale = 1.0 }
+$defaults = @{ poll_seconds = 20; stale_minutes = 30; window_left = 60; window_top = 60; win_w = 254; win_h = 230 }
 $cfg = @{}; foreach ($k in @($defaults.Keys)) { $cfg[$k] = $defaults[$k] }
 if (Test-Path $cfgFile) {
     try { (Get-Content $cfgFile -Raw | ConvertFrom-Json).psobject.Properties | ForEach-Object { $cfg[$_.Name] = $_.Value } } catch { }
@@ -40,7 +40,8 @@ if (Test-Path $stateFile) {
         $st = Get-Content $stateFile -Raw | ConvertFrom-Json
         if ($null -ne $st.window_left) { $cfg.window_left = $st.window_left }
         if ($null -ne $st.window_top)  { $cfg.window_top  = $st.window_top }
-        if ($null -ne $st.scale)       { $cfg.scale       = $st.scale }
+        if ($null -ne $st.win_w)       { $cfg.win_w       = $st.win_w }
+        if ($null -ne $st.win_h)       { $cfg.win_h       = $st.win_h }
         # live_sync is the current name; fable_bar is the old one, still honored.
         if ($null -ne $st.live_sync)   { $cfg.live_sync   = $st.live_sync }
         elseif ($null -ne $st.fable_bar) { $cfg.live_sync = $st.fable_bar }
@@ -61,25 +62,28 @@ foreach ($k in @($defaults.Keys)) {
 }
 $cfg.poll_seconds  = [math]::Max(1, $cfg.poll_seconds)
 $cfg.stale_minutes = [math]::Max(1, $cfg.stale_minutes)
-$cfg.track_width   = [math]::Min(2000, [math]::Max(50, $cfg.track_width))
-# One source of truth for the drag-resize band - used here to clamp the startup value AND
-# in the grip drag handler, so they can never diverge.
-$SCALE_MIN = 0.6; $SCALE_MAX = 2.5
-$cfg.scale         = [math]::Min($SCALE_MAX, [math]::Max($SCALE_MIN, $cfg.scale))
-$TRACK = [double]$cfg.track_width
+# Free-resize bounds (match the window's MinWidth/MinHeight in the XAML). One source of
+# truth, used to clamp the saved size at startup AND in the grip drag handlers.
+$MIN_W = 190.0; $MIN_H = 150.0; $MAX_W = 1400.0; $MAX_H = 1200.0
+$cfg.win_w = [math]::Min($MAX_W, [math]::Max($MIN_W, $cfg.win_w))
+$cfg.win_h = [math]::Min($MAX_H, [math]::Max($MIN_H, $cfg.win_h))
 
 $xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         WindowStyle="None" AllowsTransparency="True" Background="Transparent"
         Topmost="True" ResizeMode="NoResize" ShowInTaskbar="False"
-        SizeToContent="WidthAndHeight" Title="Moth">
+        Width="254" Height="230" MinWidth="190" MinHeight="150" Title="Moth">
   <Grid>
     <Border x:Name="Card" CornerRadius="14" Background="#FB0B0D14" BorderBrush="#1A1E2E" BorderThickness="1" Padding="16,12,16,12">
-    <Border.LayoutTransform><ScaleTransform x:Name="CardScale" ScaleX="1" ScaleY="1"/></Border.LayoutTransform>
     <Border.Effect><DropShadowEffect BlurRadius="26" ShadowDepth="0" Opacity="0.18" Color="#FFB65C"/></Border.Effect>
-    <StackPanel>
-      <Grid x:Name="TitleBar" Margin="0,0,0,10">
+    <Grid>
+      <Grid.RowDefinitions>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="*"/>
+        <RowDefinition Height="Auto"/>
+      </Grid.RowDefinitions>
+      <Grid x:Name="TitleBar" Grid.Row="0" Margin="0,0,0,10">
         <StackPanel Orientation="Horizontal" HorizontalAlignment="Left" VerticalAlignment="Center">
           <!-- Moth logo: spark above, wings swept up toward it, tail below (the A mark) -->
           <Canvas Width="16" Height="14" Margin="0,1,7,0">
@@ -100,12 +104,14 @@ $xaml = @"
         </StackPanel>
       </Grid>
 
+      <!-- bars: fill the middle row; tracks stretch to card width; thickness set in code -->
+      <StackPanel x:Name="BarsPanel" Grid.Row="1" VerticalAlignment="Center">
       <!-- 5-hour -->
       <Grid Margin="0,0,0,2">
         <TextBlock Text="5-hour" Foreground="#C9BFA9" FontFamily="Segoe UI" FontSize="13" HorizontalAlignment="Left"/>
         <TextBlock x:Name="Pct5" Text="--%" Foreground="#FFD9A0" FontFamily="Segoe UI" FontSize="13" FontWeight="SemiBold" HorizontalAlignment="Right"/>
       </Grid>
-      <Border Width="$TRACK" Height="8" CornerRadius="4" Background="#181A24" HorizontalAlignment="Left" Margin="0,0,0,2">
+      <Border x:Name="Track5" Height="8" CornerRadius="4" Background="#181A24" HorizontalAlignment="Stretch" Margin="0,0,0,2">
         <Border x:Name="Fill5" Width="0" Height="8" CornerRadius="4" Background="#FFB65C" HorizontalAlignment="Left">
           <Border.Effect><DropShadowEffect BlurRadius="8" ShadowDepth="0" Opacity="0.55" Color="#FFB65C"/></Border.Effect>
         </Border>
@@ -123,7 +129,7 @@ $xaml = @"
         <TextBlock Text="Weekly" Foreground="#C9BFA9" FontFamily="Segoe UI" FontSize="13" HorizontalAlignment="Left"/>
         <TextBlock x:Name="Pct7" Text="--%" Foreground="#FFD9A0" FontFamily="Segoe UI" FontSize="13" FontWeight="SemiBold" HorizontalAlignment="Right"/>
       </Grid>
-      <Border Width="$TRACK" Height="8" CornerRadius="4" Background="#181A24" HorizontalAlignment="Left" Margin="0,0,0,2">
+      <Border x:Name="Track7" Height="8" CornerRadius="4" Background="#181A24" HorizontalAlignment="Stretch" Margin="0,0,0,2">
         <Border x:Name="Fill7" Width="0" Height="8" CornerRadius="4" Background="#FFB65C" HorizontalAlignment="Left">
           <Border.Effect><DropShadowEffect BlurRadius="8" ShadowDepth="0" Opacity="0.55" Color="#FFB65C"/></Border.Effect>
         </Border>
@@ -136,23 +142,29 @@ $xaml = @"
           <TextBlock x:Name="FableLabel" Text="Fable (weekly)" Foreground="#C9BFA9" FontFamily="Segoe UI" FontSize="13" HorizontalAlignment="Left"/>
           <TextBlock x:Name="PctF" Text="--%" Foreground="#FFD9A0" FontFamily="Segoe UI" FontSize="13" FontWeight="SemiBold" HorizontalAlignment="Right"/>
         </Grid>
-        <Border Width="$TRACK" Height="8" CornerRadius="4" Background="#181A24" HorizontalAlignment="Left" Margin="0,0,0,2">
+        <Border x:Name="TrackF" Height="8" CornerRadius="4" Background="#181A24" HorizontalAlignment="Stretch" Margin="0,0,0,2">
           <Border x:Name="FillF" Width="0" Height="8" CornerRadius="4" Background="#E8A34C" HorizontalAlignment="Left"/>
         </Border>
         <TextBlock x:Name="ResetF" Text="" Foreground="#6E6552" FontFamily="Segoe UI" FontSize="11" Margin="0,0,0,8"/>
       </StackPanel>
+      </StackPanel>
 
-      <TextBlock x:Name="Updated" Text="waiting for Claude usage data..." Foreground="#6E6552"
+      <TextBlock x:Name="Updated" Grid.Row="2" Text="waiting for Claude usage data..." Foreground="#6E6552"
                  FontFamily="Segoe UI" FontSize="11" HorizontalAlignment="Left"/>
-    </StackPanel>
+    </Grid>
     </Border>
-    <!-- Corner resize grip: sibling of the card so it stays a constant size while the
-         card scales. Drag it to resize the whole widget. -->
-    <Border x:Name="ResizeGrip" Width="16" Height="16" Margin="0,0,4,4"
-            HorizontalAlignment="Right" VerticalAlignment="Bottom"
-            Background="Transparent" Cursor="SizeNWSE" ToolTip="Drag to resize">
-      <Path Stroke="#7A6E55" StrokeThickness="1.4" SnapsToDevicePixels="True"
-            Data="M 14,7 L 7,14 M 14,11 L 11,14"/>
+    <!-- Free-resize grips: thin transparent edge strips + corner squares over the card
+         edges. NoResize window + manual drag so it works on a transparent window. Only the
+         bottom-right corner shows a visible hint; the rest are invisible hit zones. -->
+    <Border x:Name="GripL"  HorizontalAlignment="Left"   VerticalAlignment="Stretch"   Width="6"  Background="Transparent" Cursor="SizeWE" Tag="L"/>
+    <Border x:Name="GripR"  HorizontalAlignment="Right"  VerticalAlignment="Stretch"   Width="6"  Background="Transparent" Cursor="SizeWE" Tag="R"/>
+    <Border x:Name="GripT"  VerticalAlignment="Top"      HorizontalAlignment="Stretch" Height="6" Background="Transparent" Cursor="SizeNS" Tag="T"/>
+    <Border x:Name="GripB"  VerticalAlignment="Bottom"   HorizontalAlignment="Stretch" Height="6" Background="Transparent" Cursor="SizeNS" Tag="B"/>
+    <Border x:Name="GripTL" HorizontalAlignment="Left"   VerticalAlignment="Top"    Width="11" Height="11" Background="Transparent" Cursor="SizeNWSE" Tag="TL"/>
+    <Border x:Name="GripTR" HorizontalAlignment="Right"  VerticalAlignment="Top"    Width="11" Height="11" Background="Transparent" Cursor="SizeNESW" Tag="TR"/>
+    <Border x:Name="GripBL" HorizontalAlignment="Left"   VerticalAlignment="Bottom" Width="11" Height="11" Background="Transparent" Cursor="SizeNESW" Tag="BL"/>
+    <Border x:Name="GripBR" HorizontalAlignment="Right"  VerticalAlignment="Bottom" Width="14" Height="14" Margin="0,0,3,3" Background="Transparent" Cursor="SizeNWSE" Tag="BR">
+      <Path Stroke="#7A6E55" StrokeThickness="1.4" SnapsToDevicePixels="True" Data="M 11,4 L 4,11 M 11,8 L 8,11"/>
     </Border>
   </Grid>
 </Window>
@@ -174,10 +186,12 @@ $Pct7    = $win.FindName('Pct7');  $Fill7 = $win.FindName('Fill7');  $Reset7 = $
 $FableGroup = $win.FindName('FableGroup'); $FableLabel = $win.FindName('FableLabel')
 $PctF    = $win.FindName('PctF');  $FillF = $win.FindName('FillF');  $ResetF = $win.FindName('ResetF')
 $Updated = $win.FindName('Updated')
-$CardScale = $win.FindName('CardScale'); $ResizeGrip = $win.FindName('ResizeGrip')
-# Apply the saved/default size before the window is shown (SizeToContent fits the window
-# to the scaled card).
-$CardScale.ScaleX = [double]$cfg.scale; $CardScale.ScaleY = [double]$cfg.scale
+$BarsPanel = $win.FindName('BarsPanel')
+$Track5 = $win.FindName('Track5'); $Track7 = $win.FindName('Track7'); $TrackF = $win.FindName('TrackF')
+$Grips = @('GripL','GripR','GripT','GripB','GripTL','GripTR','GripBL','GripBR') | ForEach-Object { $win.FindName($_) }
+# Apply the saved/default window size before the window is shown.
+$win.Width  = [double]$cfg.win_w
+$win.Height = [double]$cfg.win_h
 
 $win.Left = [double]$cfg.window_left
 $win.Top  = [double]$cfg.window_top
@@ -252,9 +266,10 @@ function Save-WindowState {
     # (a minimized window reports a bogus off-screen position we must not persist).
     try {
         if ($null -eq $win -or $win.WindowState -ne [Windows.WindowState]::Normal) { return }
-        $sc = if ($CardScale) { [math]::Round([double]$CardScale.ScaleX, 3) } else { 1.0 }
-        # Key includes scale so a pure resize (no move) still triggers a write.
-        $key = '{0},{1},{2}' -f [int]$win.Left, [int]$win.Top, $sc
+        $w = [int][math]::Round([double]$win.ActualWidth); $h = [int][math]::Round([double]$win.ActualHeight)
+        if ($w -le 0) { $w = [int]$win.Width }; if ($h -le 0) { $h = [int]$win.Height }
+        # Key includes size so a pure resize (no move) still triggers a write.
+        $key = '{0},{1},{2},{3}' -f [int]$win.Left, [int]$win.Top, $w, $h
         if ($key -eq $script:lastSavedPos) { return }
         $st = @{}
         if (Test-Path $stateFile) {
@@ -262,9 +277,35 @@ function Save-WindowState {
         }
         $st.window_left = [int]$win.Left
         $st.window_top  = [int]$win.Top
-        $st.scale       = $sc
+        $st.win_w       = $w
+        $st.win_h       = $h
+        [void]$st.Remove('scale')   # drop the legacy uniform-scale key if present
         Write-Utf8NoBom $stateFile ([pscustomobject]$st | ConvertTo-Json)
         $script:lastSavedPos = $key
+    } catch { }
+}
+
+$script:p5 = 0; $script:p7 = 0; $script:pf = 0
+function Update-Layout {
+    # Fluid, distortion-free resize: the bars FILL the current width (fill = pct of the
+    # stretched track's actual width) and THICKEN with window height; text is untouched.
+    # Runs on every data update and on window SizeChanged.
+    try {
+        if ($null -eq $win) { return }
+        $h = [double]$win.ActualHeight; if ($h -le 0) { $h = [double]$win.Height }
+        $barH = [math]::Max(6.0, [math]::Min(46.0, 8.0 + ($h - 230.0) * 0.06))
+        $rad  = New-Object Windows.CornerRadius(($barH / 2.0))
+        # All three tracks stretch to the SAME card width, so take the widest laid-out one
+        # (a collapsed/not-yet-measured track reports 0 and would otherwise NaN the fill).
+        $tw = 0.0
+        foreach ($t in @($Track5,$Track7,$TrackF)) { if ($t -and [double]$t.ActualWidth -gt $tw) { $tw = [double]$t.ActualWidth } }
+        foreach ($p in @(@($Track5,$Fill5,$script:p5), @($Track7,$Fill7,$script:p7), @($TrackF,$FillF,$script:pf))) {
+            $track = $p[0]; $fill = $p[1]; $pct = [double]$p[2]
+            if ($null -eq $track) { continue }
+            $track.Height = $barH; $track.CornerRadius = $rad
+            $fill.Height = $barH;  $fill.CornerRadius = $rad
+            $fill.Width = [math]::Max(0.0, $pct / 100.0 * $tw)
+        }
     } catch { }
 }
 
@@ -286,8 +327,7 @@ function Update-Display {
     $p7 = [math]::Max(0, [math]::Min(100, ([double]$c.seven_day.used_percentage)))
     $Pct5.Text = ('{0}%' -f [math]::Round($p5))
     $Pct7.Text = ('{0}%' -f [math]::Round($p7))
-    $Fill5.Width = $p5 / 100 * $TRACK
-    $Fill7.Width = $p7 / 100 * $TRACK
+    $script:p5 = $p5; $script:p7 = $p7   # Update-Layout turns these into fill widths (fluid)
     $col5 = if ($stale) { $STALE_BAR } else { Get-BarColor $p5 }
     $col7 = if ($stale) { $STALE_BAR } else { Get-BarColor $p7 }
     $Fill5.Background = [Windows.Media.BrushConverter]::new().ConvertFromString($col5)
@@ -320,14 +360,16 @@ function Update-Display {
             $fableStale = ([math]::Floor(($now - [long]$c.fable.captured_at) / 60)) -ge [int]$cfg.stale_minutes
         }
         $PctF.Text = ('{0}%' -f [math]::Round($pf))
-        $FillF.Width = $pf / 100 * $TRACK
+        $script:pf = $pf
         $FillF.Background = [Windows.Media.BrushConverter]::new().ConvertFromString($(if ($fableStale) { $STALE_BAR } else { '#E8A34C' }))
         if ($c.fable.label) { $FableLabel.Text = ('{0} (weekly)' -f $c.fable.label) }
         if ($c.fable.resets_at) { $ResetF.Text = Format-Remaining ([long]$c.fable.resets_at) }
         $FableGroup.Visibility = [Windows.Visibility]::Visible
     } else {
+        $script:pf = 0
         $FableGroup.Visibility = [Windows.Visibility]::Collapsed
     }
+    Update-Layout   # size the (stretchable) bars to the current width + height
 
     # Card is ALWAYS fully opaque - staleness lives in the bars + label, never opacity.
     $Card.Opacity = 1.0
@@ -555,51 +597,62 @@ $CloseBtn.Add_MouseLeftButtonDown({ $_.Handled = $true; $script:userClosed = $tr
 # DragMove throws if the button was already released - ignore that.
 $win.Add_MouseLeftButtonDown({ try { $win.DragMove() } catch { } })
 
-# ---- drag-to-resize (corner grip) ----
-# The grip's press is marked Handled so the window-level DragMove never fires - this is
-# resize, not move. The cursor is tracked in ABSOLUTE SCREEN pixels so the math is immune
-# to the window resizing/repositioning under the pointer mid-drag. Uniform scale keeps the
-# card's aspect; SizeToContent refits the window; the size persists on release.
-# Every handler is wrapped: an unhandled exception in a WPF event handler propagates to
-# the dispatcher and, via the outer catch, would take the whole widget down.
-$script:resizing = $false
-$ResizeGrip.Add_MouseLeftButtonDown({
+# ---- free resize (8 edge/corner grips) ----
+# NoResize transparent window, so resize is manual. Each grip's Tag names the active edges
+# (L/R/T/B; corners combine them). Cursor is tracked in absolute SCREEN pixels and converted
+# to DIPs via the window's DPI so the drag is 1:1 at any display scale. The grip press is
+# Handled so the window's DragMove never competes. Every handler is wrapped - an exception
+# in a WPF event handler propagates to the dispatcher and would take the whole widget down.
+# ($this is the grip that fired; one shared handler serves all 8.)
+$script:rz = $null
+$rzDown = {
     try {
         $_.Handled = $true
-        $script:resizeOrigin = [System.Windows.Forms.Cursor]::Position
-        $script:resizeStartScale = [double]$CardScale.ScaleX
-        # Only enter resize mode if capture actually took - otherwise a drag off the tiny
-        # grip would never see the MouseUp and we'd get stuck resizing.
-        $script:resizing = [bool]$ResizeGrip.CaptureMouse()
-    } catch { $script:resizing = $false }
-})
-$ResizeGrip.Add_MouseMove({
-    try {
-        # Self-heal: if the button isn't actually down (lost capture, click elsewhere
-        # mid-drag), stop - never rescale on a bare hover over the grip.
-        if (-not $script:resizing) { return }
-        if ($_.LeftButton -ne [System.Windows.Input.MouseButtonState]::Pressed) { $script:resizing = $false; return }
         $p = [System.Windows.Forms.Cursor]::Position
-        $delta = ($p.X - $script:resizeOrigin.X) + ($p.Y - $script:resizeOrigin.Y)
-        $s = $script:resizeStartScale + ($delta / 220.0)
-        $s = [math]::Max($SCALE_MIN, [math]::Min($SCALE_MAX, $s))
-        $CardScale.ScaleX = $s; $CardScale.ScaleY = $s
-    } catch { $script:resizing = $false }
-})
-$ResizeGrip.Add_MouseLeftButtonUp({
+        $dip = 1.0
+        try { $src = [System.Windows.PresentationSource]::FromVisual($win); if ($src) { $dip = [double]$src.CompositionTarget.TransformFromDevice.M11 } } catch { }
+        $script:rz = @{ mode = [string]$this.Tag; px = $p.X; py = $p.Y
+                        L = [double]$win.Left; T = [double]$win.Top; W = [double]$win.ActualWidth; H = [double]$win.ActualHeight; dip = $dip }
+        if (-not $this.CaptureMouse()) { $script:rz = $null }
+    } catch { $script:rz = $null }
+}
+$rzMove = {
     try {
-        if (-not $script:resizing) { return }
-        $_.Handled = $true
-        $script:resizing = $false
-        $ResizeGrip.ReleaseMouseCapture()
-        Save-WindowState   # persist the new size
+        if ($null -eq $script:rz) { return }
+        if ($_.LeftButton -ne [System.Windows.Input.MouseButtonState]::Pressed) { $script:rz = $null; return }
+        $p = [System.Windows.Forms.Cursor]::Position
+        $dx = ($p.X - $script:rz.px) * $script:rz.dip
+        $dy = ($p.Y - $script:rz.py) * $script:rz.dip
+        $m = $script:rz.mode; $W = $script:rz.W; $H = $script:rz.H; $L = $script:rz.L; $T = $script:rz.T
+        $newW = $W; $newH = $H; $newL = $L; $newT = $T
+        if ($m -like '*R*') { $newW = $W + $dx }
+        if ($m -like '*L*') { $newW = $W - $dx }
+        if ($m -like '*B*') { $newH = $H + $dy }
+        if ($m -like '*T*') { $newH = $H - $dy }
+        $newW = [math]::Max($MIN_W, [math]::Min($MAX_W, $newW))
+        $newH = [math]::Max($MIN_H, [math]::Min($MAX_H, $newH))
+        if ($m -like '*L*') { $newL = $L + ($W - $newW) }   # left/top edges move the origin
+        if ($m -like '*T*') { $newT = $T + ($H - $newH) }
+        $win.Left = $newL; $win.Top = $newT; $win.Width = $newW; $win.Height = $newH
+    } catch { $script:rz = $null }
+}
+$rzUp = {
+    try {
+        if ($null -eq $script:rz) { return }
+        $_.Handled = $true; $script:rz = $null
+        $this.ReleaseMouseCapture(); Save-WindowState
     } catch { }
-})
-# WPF capture is app-scoped: clicking another window mid-drag fires LostMouseCapture with
-# no MouseUp. Reset the flag (and persist) so the widget never gets stuck resizing.
-$ResizeGrip.Add_LostMouseCapture({
-    if ($script:resizing) { $script:resizing = $false; try { Save-WindowState } catch { } }
-})
+}
+# App-scoped capture: clicking another window mid-drag fires LostMouseCapture with no
+# MouseUp. Clear state (and persist) so the widget can never get stuck resizing.
+$rzLost = { if ($script:rz) { $script:rz = $null; try { Save-WindowState } catch { } } }
+foreach ($g in $Grips) {
+    if ($null -eq $g) { continue }
+    $g.Add_MouseLeftButtonDown($rzDown); $g.Add_MouseMove($rzMove)
+    $g.Add_MouseLeftButtonUp($rzUp);      $g.Add_LostMouseCapture($rzLost)
+}
+# Reflow the bars whenever the window size changes (drag, or programmatic).
+$win.Add_SizeChanged({ Update-Layout })
 
 $win.Add_Closing({
     Save-WindowState
@@ -624,26 +677,28 @@ $win.Add_StateChanged({
 if ($SelfTest -or $Screenshot) {
     if ($SelfTest -and $SelfTest -ne 'empty') { $script:cache = (Get-Content $SelfTest -Raw | ConvertFrom-Json) }
     elseif ($Screenshot -and (Test-Path $cacheFile)) { $script:cache = (Get-Content $cacheFile -Raw | ConvertFrom-Json) }
-    Update-Display
+    # The window is never shown here, so nothing lays it out. Detach the content and force a
+    # layout pass at the window size so the fluid bars (and ActualWidth) are real.
+    $ww = [double]$win.Width; $wh = [double]$win.Height
+    $rootEl = $win.Content; $win.Content = $null
+    $rootEl.Measure([Windows.Size]::new($ww, $wh))
+    $rootEl.Arrange([Windows.Rect]::new(0, 0, $ww, $wh))
+    $rootEl.UpdateLayout()
+    Update-Display   # sets text/visibility/percentages, then Update-Layout fills the bars
     if ($SelfTest) {
         $fableDump = if ($FableGroup.Visibility -eq [Windows.Visibility]::Visible) {
             "Fable[vis {0}='{1}' {2} reset='{3}']" -f $PctF.Text, $FableLabel.Text, [math]::Round($FillF.Width,1), $ResetF.Text
         } else { "Fable[collapsed]" }
-        Write-Output ("SELFTEST OK | Pct5={0} Fill5W={1} Reset5='{2}' | Pct7={3} Fill7W={4} Reset7='{5}' | {6} | Scale={7} | Opacity={8} | {9}" -f `
-            $Pct5.Text, [math]::Round($Fill5.Width,1), $Reset5.Text, $Pct7.Text, [math]::Round($Fill7.Width,1), $Reset7.Text, $Updated.Text, [math]::Round($CardScale.ScaleX,2), $Card.Opacity, $fableDump)
+        Write-Output ("SELFTEST OK | Pct5={0} Fill5W={1} Reset5='{2}' | Pct7={3} Fill7W={4} Reset7='{5}' | {6} | Win={7}x{8} | Opacity={9} | {10}" -f `
+            $Pct5.Text, [math]::Round($Fill5.Width,1), $Reset5.Text, $Pct7.Text, [math]::Round($Fill7.Width,1), $Reset7.Text, $Updated.Text, [int]$ww, [int]$wh, $Card.Opacity, $fableDump)
     }
     if ($Screenshot) {
         $Card.Opacity = 1.0
-        $ResizeGrip.Visibility = [Windows.Visibility]::Collapsed   # hide the grip in the shot
-        # Render the Grid (the window's content, holding the scaled card). Detach it from
-        # the window so it becomes a parentless root we can Measure/Arrange standalone -
-        # the visual tree isn't built until the window is shown, which -Screenshot never does.
-        $rootEl = $win.Content
-        $win.Content = $null
-        $rootEl.Measure([Windows.Size]::new([double]::PositiveInfinity, [double]::PositiveInfinity))
-        $rootEl.Arrange([Windows.Rect]::new(0, 0, $rootEl.DesiredSize.Width, $rootEl.DesiredSize.Height))
+        foreach ($g in $Grips) { if ($g) { $g.Visibility = [Windows.Visibility]::Collapsed } }  # hide grips in the shot
+        $rootEl.Measure([Windows.Size]::new($ww, $wh))
+        $rootEl.Arrange([Windows.Rect]::new(0, 0, $ww, $wh))
         $rootEl.UpdateLayout()
-        $w = [int][math]::Ceiling($rootEl.ActualWidth); $h = [int][math]::Ceiling($rootEl.ActualHeight)
+        $w = [int][math]::Ceiling($ww); $h = [int][math]::Ceiling($wh)
         $rtb = New-Object Windows.Media.Imaging.RenderTargetBitmap($w, $h, 96, 96, [Windows.Media.PixelFormats]::Pbgra32)
         $rtb.Render($rootEl)
         $enc = New-Object Windows.Media.Imaging.PngBitmapEncoder
