@@ -28,7 +28,7 @@ function Write-ErrorLog($msg) {
 }
 
 # ---- config (shipped defaults; user-editable) + window state (runtime; gitignored) ----
-$defaults = @{ poll_seconds = 20; stale_minutes = 30; window_left = 60; window_top = 60; win_w = 254; win_h = 230 }
+$defaults = @{ poll_seconds = 20; stale_minutes = 30; window_left = 60; window_top = 60; win_w = 294; win_h = 270 }
 $cfg = @{}; foreach ($k in @($defaults.Keys)) { $cfg[$k] = $defaults[$k] }
 if (Test-Path $cfgFile) {
     try { (Get-Content $cfgFile -Raw | ConvertFrom-Json).psobject.Properties | ForEach-Object { $cfg[$_.Name] = $_.Value } } catch { }
@@ -64,7 +64,7 @@ $cfg.poll_seconds  = [math]::Max(1, $cfg.poll_seconds)
 $cfg.stale_minutes = [math]::Max(1, $cfg.stale_minutes)
 # Free-resize bounds (match the window's MinWidth/MinHeight in the XAML). One source of
 # truth, used to clamp the saved size at startup AND in the grip drag handlers.
-$MIN_W = 190.0; $MIN_H = 150.0; $MAX_W = 1400.0; $MAX_H = 1200.0
+$MIN_W = 230.0; $MIN_H = 190.0; $MAX_W = 1440.0; $MAX_H = 1240.0
 $cfg.win_w = [math]::Min($MAX_W, [math]::Max($MIN_W, $cfg.win_w))
 $cfg.win_h = [math]::Min($MAX_H, [math]::Max($MIN_H, $cfg.win_h))
 
@@ -73,10 +73,12 @@ $xaml = @"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         WindowStyle="None" AllowsTransparency="True" Background="Transparent"
         Topmost="True" ResizeMode="NoResize" ShowInTaskbar="False"
-        Width="254" Height="230" MinWidth="190" MinHeight="150" Title="Moth">
+        Width="294" Height="270" MinWidth="230" MinHeight="190" Title="Moth">
   <Grid>
-    <Border x:Name="Card" CornerRadius="14" Background="#FB0B0D14" BorderBrush="#1A1E2E" BorderThickness="1" Padding="16,12,16,12">
-    <Border.Effect><DropShadowEffect BlurRadius="26" ShadowDepth="0" Opacity="0.18" Color="#FFB65C"/></Border.Effect>
+    <Border x:Name="Card" CornerRadius="14" Background="#FB0B0D14" BorderBrush="#1A1E2E" BorderThickness="1" Padding="16,12,16,12" Margin="20">
+    <!-- Card is inset 20px inside the window so the amber glow (blur 18 < 20) fades to
+         nothing BEFORE the window edge - no square clip at the rounded corners. -->
+    <Border.Effect><DropShadowEffect BlurRadius="18" ShadowDepth="0" Opacity="0.2" Color="#FFB65C"/></Border.Effect>
     <Grid>
       <Grid.RowDefinitions>
         <RowDefinition Height="Auto"/>
@@ -156,15 +158,16 @@ $xaml = @"
     <!-- Free-resize grips: thin transparent edge strips + corner squares over the card
          edges. NoResize window + manual drag so it works on a transparent window. Only the
          bottom-right corner shows a visible hint; the rest are invisible hit zones. -->
-    <Border x:Name="GripL"  HorizontalAlignment="Left"   VerticalAlignment="Stretch"   Width="6"  Background="Transparent" Cursor="SizeWE" Tag="L"/>
-    <Border x:Name="GripR"  HorizontalAlignment="Right"  VerticalAlignment="Stretch"   Width="6"  Background="Transparent" Cursor="SizeWE" Tag="R"/>
-    <Border x:Name="GripT"  VerticalAlignment="Top"      HorizontalAlignment="Stretch" Height="6" Background="Transparent" Cursor="SizeNS" Tag="T"/>
-    <Border x:Name="GripB"  VerticalAlignment="Bottom"   HorizontalAlignment="Stretch" Height="6" Background="Transparent" Cursor="SizeNS" Tag="B"/>
-    <Border x:Name="GripTL" HorizontalAlignment="Left"   VerticalAlignment="Top"    Width="11" Height="11" Background="Transparent" Cursor="SizeNWSE" Tag="TL"/>
-    <Border x:Name="GripTR" HorizontalAlignment="Right"  VerticalAlignment="Top"    Width="11" Height="11" Background="Transparent" Cursor="SizeNESW" Tag="TR"/>
-    <Border x:Name="GripBL" HorizontalAlignment="Left"   VerticalAlignment="Bottom" Width="11" Height="11" Background="Transparent" Cursor="SizeNESW" Tag="BL"/>
-    <Border x:Name="GripBR" HorizontalAlignment="Right"  VerticalAlignment="Bottom" Width="14" Height="14" Margin="0,0,3,3" Background="Transparent" Cursor="SizeNWSE" Tag="BR">
-      <Path Stroke="#7A6E55" StrokeThickness="1.4" SnapsToDevicePixels="True" Data="M 11,4 L 4,11 M 11,8 L 8,11"/>
+    <!-- Grips are inset by the 20px card margin so you grab the VISIBLE card edge, not the halo. -->
+    <Border x:Name="GripL"  HorizontalAlignment="Left"   VerticalAlignment="Stretch"   Width="6"  Margin="20,20,0,20" Background="Transparent" Cursor="SizeWE" Tag="L"/>
+    <Border x:Name="GripR"  HorizontalAlignment="Right"  VerticalAlignment="Stretch"   Width="6"  Margin="0,20,20,20" Background="Transparent" Cursor="SizeWE" Tag="R"/>
+    <Border x:Name="GripT"  VerticalAlignment="Top"      HorizontalAlignment="Stretch" Height="6" Margin="20,20,20,0" Background="Transparent" Cursor="SizeNS" Tag="T"/>
+    <Border x:Name="GripB"  VerticalAlignment="Bottom"   HorizontalAlignment="Stretch" Height="6" Margin="20,0,20,20" Background="Transparent" Cursor="SizeNS" Tag="B"/>
+    <Border x:Name="GripTL" HorizontalAlignment="Left"   VerticalAlignment="Top"    Width="12" Height="12" Margin="20,20,0,0" Background="Transparent" Cursor="SizeNWSE" Tag="TL"/>
+    <Border x:Name="GripTR" HorizontalAlignment="Right"  VerticalAlignment="Top"    Width="12" Height="12" Margin="0,20,20,0" Background="Transparent" Cursor="SizeNESW" Tag="TR"/>
+    <Border x:Name="GripBL" HorizontalAlignment="Left"   VerticalAlignment="Bottom" Width="12" Height="12" Margin="20,0,0,20" Background="Transparent" Cursor="SizeNESW" Tag="BL"/>
+    <Border x:Name="GripBR" HorizontalAlignment="Right"  VerticalAlignment="Bottom" Width="15" Height="15" Margin="0,0,22,22" Background="Transparent" Cursor="SizeNWSE" Tag="BR">
+      <Path Stroke="#7A6E55" StrokeThickness="1.4" SnapsToDevicePixels="True" Data="M 12,4 L 4,12 M 12,8 L 8,12"/>
     </Border>
   </Grid>
 </Window>
@@ -293,7 +296,7 @@ function Update-Layout {
     try {
         if ($null -eq $win) { return }
         $h = [double]$win.ActualHeight; if ($h -le 0) { $h = [double]$win.Height }
-        $barH = [math]::Max(6.0, [math]::Min(46.0, 8.0 + ($h - 230.0) * 0.06))
+        $barH = [math]::Max(6.0, [math]::Min(46.0, 8.0 + ($h - 270.0) * 0.06))
         $rad  = New-Object Windows.CornerRadius(($barH / 2.0))
         # All three tracks stretch to the SAME card width, so take the widest laid-out one
         # (a collapsed/not-yet-measured track reports 0 and would otherwise NaN the fill).
