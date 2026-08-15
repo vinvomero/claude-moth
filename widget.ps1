@@ -376,6 +376,22 @@ function Update-Display {
 
     # Card is ALWAYS fully opaque - staleness lives in the bars + label, never opacity.
     $Card.Opacity = 1.0
+    # Card halo reacts to usage: it tracks the HOTTEST limit (5h / weekly / per-model) -
+    # soft amber when you're fine, warming to orange/red and brightening as you near a
+    # limit ("the flame rising"). Blur stays fixed (<= inset margin) so corners never clip;
+    # only colour + opacity change. Muted grey + dim when stale, matching the bars.
+    try {
+        if ($Card.Effect) {
+            $heat = [math]::Max($p5, [math]::Max($p7, [double]$script:pf))
+            if ($stale) {
+                $Card.Effect.Color   = [Windows.Media.ColorConverter]::ConvertFromString($STALE_BAR)
+                $Card.Effect.Opacity = 0.12
+            } else {
+                $Card.Effect.Color   = [Windows.Media.ColorConverter]::ConvertFromString((Get-BarColor $heat))
+                $Card.Effect.Opacity = [math]::Max(0.12, [math]::Min(0.55, 0.12 + $heat / 100.0 * 0.45))
+            }
+        }
+    } catch { }
     if ($script:epExpired -and $stale) {
         # Expired token is NOT a login problem - the user IS logged in; the file just
         # aged out. Say what's actually happening (nudge in flight) or what actually
