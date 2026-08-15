@@ -9,7 +9,7 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 $root = Split-Path $PSScriptRoot -Parent
 $out  = Join-Path $root 'assets\moth-demo.gif'
 $TRACK = 220.0
-$PAD = 26      # dark "desktop" margin around the card (GIF has no alpha - avoid ragged corners)
+$PAD = 30      # dark "desktop" margin around the card so the glow fades cleanly (>= blur 18)
 $BG  = '#0B0D14'
 
 # --- the card, mirroring widget.ps1 (5-hour + Weekly + per-model Fable bar, reactive halo) ---
@@ -132,25 +132,28 @@ function Set-State($f) {
 }
 Set-State $frames[0]
 $card.Measure([Windows.Size]::new([double]::PositiveInfinity, [double]::PositiveInfinity))
-$card.Arrange([Windows.Rect]::new(0,0,$card.DesiredSize.Width,$card.DesiredSize.Height)); $card.UpdateLayout()
-$cw = [int][math]::Ceiling($card.ActualWidth); $ch = [int][math]::Ceiling($card.ActualHeight)
+$cw = [int][math]::Ceiling($card.DesiredSize.Width); $ch = [int][math]::Ceiling($card.DesiredSize.Height)
 $fw = $cw + 2*$PAD; $fh = $ch + 2*$PAD
+
+# Host the card INSIDE a frame-sized Grid with the dark "desktop" background, inset by PAD
+# on every side. Rendering the host (not the card into a card-sized bitmap) lets the amber
+# glow spread into the margin and fade - no square clip at the rounded corners, matching the
+# real widget's inset-card look.
+$hostGrid = New-Object Windows.Controls.Grid
+$hostGrid.Width = $fw; $hostGrid.Height = $fh
+$hostGrid.Background = (& $brush $BG)
+$card.HorizontalAlignment = [Windows.HorizontalAlignment]::Center
+$card.VerticalAlignment   = [Windows.VerticalAlignment]::Center
+[void]$hostGrid.Children.Add($card)
 
 $enc = New-Object Windows.Media.Imaging.GifBitmapEncoder
 foreach ($f in $frames) {
     Set-State $f
-    $card.Measure([Windows.Size]::new($cw, $ch))
-    $card.Arrange([Windows.Rect]::new(0,0,$cw,$ch)); $card.UpdateLayout()
-    $cardRtb = New-Object Windows.Media.Imaging.RenderTargetBitmap($cw, $ch, 96, 96, [Windows.Media.PixelFormats]::Pbgra32)
-    $cardRtb.Render($card)
-    # Composite onto the padded dark "desktop" background.
-    $dv = New-Object Windows.Media.DrawingVisual
-    $dc = $dv.RenderOpen()
-    $dc.DrawRectangle((& $brush $BG), $null, [Windows.Rect]::new(0,0,$fw,$fh))
-    $dc.DrawImage($cardRtb, [Windows.Rect]::new($PAD,$PAD,$cw,$ch))
-    $dc.Close()
+    $hostGrid.Measure([Windows.Size]::new($fw, $fh))
+    $hostGrid.Arrange([Windows.Rect]::new(0, 0, $fw, $fh))
+    $hostGrid.UpdateLayout()
     $frameRtb = New-Object Windows.Media.Imaging.RenderTargetBitmap($fw, $fh, 96, 96, [Windows.Media.PixelFormats]::Pbgra32)
-    $frameRtb.Render($dv)
+    $frameRtb.Render($hostGrid)
     $enc.Frames.Add([Windows.Media.Imaging.BitmapFrame]::Create($frameRtb))
 }
 $ms = New-Object System.IO.MemoryStream
