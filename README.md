@@ -50,9 +50,9 @@ and you can bring it back any time by typing **`/moth`** in Claude Code.
 The bars fill in the moment your **next** Claude Code session makes its first request.
 Until then it shows "waiting for Claude usage data…".
 
-**Resize it** by dragging the little grip in its **bottom-right corner** — Moth scales up
-or down to fit your screen and stays that size. (You can also set a starting `scale` in
-`config.json`.)
+**Resize it** by dragging **any edge or corner**, like a normal window — width and height
+are independent, the text stays crisp, and Moth remembers the size. Drag it wide and short
+to tuck under your taskbar, or tall and narrow along a screen edge.
 
 > Prefer it to start when you log into Windows instead? Run
 > `install.ps1 -AutoStart`. By default Moth only launches with Claude.
@@ -62,11 +62,16 @@ or down to fit your screen and stays that size. (You can also set a starting `sc
 - **5-hour** — how much of your rolling 5-hour allowance you've used, and when it
   resets. The tiny hourglass beside the reset time turns as the window burns down.
 - **Weekly** — same, for the 7-day window.
-- The glow tells the story: **warm amber** normally, **deep orange** past 70%,
-  **red** past 90% — the flame rising as you get close to the limit.
+- **Per-model (when live sync is on)** — a third bar for your model-scoped weekly limit,
+  labelled by whichever model it currently tracks (Fable, Opus, Sonnet…).
+- **Reset times** show the actual clock time *and* the countdown — e.g.
+  "resets 10:40 PM · in 4h 20m" — so you know exactly when, not just how long.
+- The glow tells the story, and the **whole card heats up** with it: **warm amber**
+  normally, **deep orange** past 70%, **red** past 90% — the flame rising as you get close
+  to the limit. The halo tracks whichever limit is hottest.
 - "updated Nm ago" tells you how fresh the numbers are. If data ever goes stale, the
-  bars mute to grey and the label says "last synced Nm ago" — the card stays fully
-  solid, never see-through.
+  bars and glow mute to grey and the label says "last synced Nm ago" — the card stays
+  fully solid, never see-through.
 
 ## Keeping it fresh — live sync
 
@@ -117,7 +122,7 @@ starts (or right away if you type **`/moth`**).
 | `commands/moth.md.tmpl` | template for the `/moth` command install |
 | `launch-widget.vbs` | starts the widget with no console window |
 | `assets/moth-logo.svg` | the Moth mark |
-| `config.json` | refresh rate, "stale" threshold, bar width, default position — edit if you like |
+| `config.json` | refresh rate, "stale" threshold, default position/size — edit if you like (size is also just drag-resizable) |
 | `usage-cache.json` | the latest saved numbers (created automatically) |
 | `window-state.json` | remembers where you dragged the widget (created automatically) |
 | `widget-error.log` | startup errors, written only if the widget fails to launch |

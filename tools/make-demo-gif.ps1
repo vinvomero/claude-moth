@@ -12,12 +12,12 @@ $TRACK = 220.0
 $PAD = 26      # dark "desktop" margin around the card (GIF has no alpha - avoid ragged corners)
 $BG  = '#0B0D14'
 
-# --- the card, copied from widget.ps1 (5-hour + Weekly - the default two-bar view) ---
+# --- the card, mirroring widget.ps1 (5-hour + Weekly + per-model Fable bar, reactive halo) ---
 $xaml = @"
 <Border xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         x:Name="Card" CornerRadius="14" Background="#FB0B0D14" BorderBrush="#1A1E2E" BorderThickness="1" Padding="16,12,16,12">
-  <Border.Effect><DropShadowEffect BlurRadius="26" ShadowDepth="0" Opacity="0.18" Color="#FFB65C"/></Border.Effect>
+  <Border.Effect><DropShadowEffect BlurRadius="18" ShadowDepth="0" Opacity="0.18" Color="#FFB65C"/></Border.Effect>
   <StackPanel>
     <Grid Margin="0,0,0,10">
       <StackPanel Orientation="Horizontal" HorizontalAlignment="Left" VerticalAlignment="Center">
@@ -63,6 +63,15 @@ $xaml = @"
     </Border>
     <TextBlock x:Name="Reset7" Text="resets in 4d 15h" Foreground="#6E6552" FontFamily="Segoe UI" FontSize="11" Margin="0,0,0,8"/>
 
+    <Grid Margin="0,0,0,2">
+      <TextBlock x:Name="FableLabel" Text="Fable (weekly)" Foreground="#C9BFA9" FontFamily="Segoe UI" FontSize="13" HorizontalAlignment="Left"/>
+      <TextBlock x:Name="PctF" Text="--%" Foreground="#FFD9A0" FontFamily="Segoe UI" FontSize="13" FontWeight="SemiBold" HorizontalAlignment="Right"/>
+    </Grid>
+    <Border Width="$TRACK" Height="8" CornerRadius="4" Background="#181A24" HorizontalAlignment="Left" Margin="0,0,0,2">
+      <Border x:Name="FillF" Width="0" Height="8" CornerRadius="4" Background="#E8A34C" HorizontalAlignment="Left"/>
+    </Border>
+    <TextBlock x:Name="ResetF" Text="" Foreground="#6E6552" FontFamily="Segoe UI" FontSize="11" Margin="0,0,0,8"/>
+
     <TextBlock x:Name="Updated" Text="updated just now" Foreground="#6E6552" FontFamily="Segoe UI" FontSize="11" HorizontalAlignment="Left"/>
   </StackPanel>
 </Border>
@@ -71,30 +80,33 @@ $xaml = @"
 $card = [Windows.Markup.XamlReader]::Parse($xaml)
 $Pct5 = $card.FindName('Pct5'); $Fill5 = $card.FindName('Fill5'); $Reset5 = $card.FindName('Reset5')
 $Hg = $card.FindName('Hourglass5'); $HgRot = $card.FindName('Hourglass5Rot')
-$Pct7 = $card.FindName('Pct7'); $Fill7 = $card.FindName('Fill7')
+$Pct7 = $card.FindName('Pct7'); $Fill7 = $card.FindName('Fill7'); $Reset7 = $card.FindName('Reset7')
+$PctF = $card.FindName('PctF'); $FillF = $card.FindName('FillF'); $ResetF = $card.FindName('ResetF')
 $Updated = $card.FindName('Updated')
+$SEP = [char]0x00B7   # '·' built via [char] so PS 5.1 file-encoding can't mangle it
 
 function Get-BarColor([double]$pct) {
     if ($pct -ge 90) { return '#FF5C6E' } elseif ($pct -ge 70) { return '#FF9D42' } else { return '#FFB65C' }
 }
-function Format-Mins([int]$mins) {
+function Format-Countdown([int]$mins) {
     $h = [math]::Floor($mins / 60); $m = $mins % 60
-    if ($h -gt 0) { return ("resets in {0}h {1}m" -f $h, $m) } else { return ("resets in {0}m" -f $m) }
+    if ($h -gt 0) { return ("in {0}h {1}m" -f $h, $m) } else { return ("in {0}m" -f $m) }
 }
 $brush = { param($hex) [Windows.Media.BrushConverter]::new().ConvertFromString($hex) }
 $colr  = { param($hex) [Windows.Media.ColorConverter]::ConvertFromString($hex) }
 
 # --- animation sequence: climb -> peak hold -> reset (loops) ---
+# clock = the fixed wall-clock reset time (stays put while the countdown burns down).
 $frames = @()
 $steps = 22
 for ($i = 0; $i -lt $steps; $i++) {
     $t = $i / ($steps - 1)
-    $frames += @{ p5 = (6 + $t*89); p7 = (19 + $t*8); mins5 = [int](283 - $t*235); delay = 16 }
+    $frames += @{ p5 = (6 + $t*89); p7 = (19 + $t*8); pf = (55 + $t*10); mins5 = [int](283 - $t*235); clock = '10:40 PM'; delay = 16 }
 }
-$frames += @{ p5 = 96; p7 = 27; mins5 = 44; delay = 90 }    # peak hold (red)
-$frames += @{ p5 = 96; p7 = 27; mins5 = 43; delay = 90 }
-$frames += @{ p5 = 5;  p7 = 27; mins5 = 299; delay = 70 }   # the 5-hour window resets
-$frames += @{ p5 = 5;  p7 = 27; mins5 = 299; delay = 70 }
+$frames += @{ p5 = 96; p7 = 27; pf = 65; mins5 = 44; clock = '10:40 PM'; delay = 90 }   # peak hold (red)
+$frames += @{ p5 = 96; p7 = 27; pf = 65; mins5 = 43; clock = '10:40 PM'; delay = 90 }
+$frames += @{ p5 = 5;  p7 = 27; pf = 65; mins5 = 299; clock = '3:40 AM'; delay = 70 }   # 5-hour window resets; the weekly Fable limit does not
+$frames += @{ p5 = 5;  p7 = 27; pf = 65; mins5 = 299; clock = '3:40 AM'; delay = 70 }
 
 # Lock a fixed frame size (measure the widest state once) so every GIF frame matches.
 function Set-State($f) {
@@ -104,7 +116,18 @@ function Set-State($f) {
     $Fill5.Background = (& $brush $c5); $Fill5.Effect.Color = (& $colr $c5)
     $Pct7.Text = ('{0}%' -f [math]::Round($p7)); $Fill7.Width = $p7/100*$TRACK
     $Fill7.Background = (& $brush $c7); $Fill7.Effect.Color = (& $colr $c7)
-    $Reset5.Text = Format-Mins $f.mins5
+    # Per-model (Fable) weekly bar - fixed amber, like the widget.
+    $pf = [double]$f.pf
+    $PctF.Text = ('{0}%' -f [math]::Round($pf)); $FillF.Width = $pf/100*$TRACK
+    $FillF.Background = (& $brush '#E8A34C')
+    # reactive card halo: tracks the HOTTEST of the three bars, warming amber -> orange ->
+    # red and brightening as usage climbs - the 'flame rising' applied to the whole card.
+    $heat = [math]::Max($p5, [math]::Max($p7, $pf))
+    $card.Effect.Color = (& $colr (Get-BarColor $heat))
+    $card.Effect.Opacity = [math]::Max(0.12, [math]::Min(0.55, 0.12 + $heat/100.0*0.45))
+    $Reset5.Text = ("resets {0} {1} {2}" -f $f.clock, $SEP, (Format-Countdown $f.mins5))
+    $Reset7.Text = ("resets 8:00 AM {0} in 4d 15h" -f $SEP)
+    $ResetF.Text = ("resets 8:00 AM {0} in 4d 15h" -f $SEP)
     $HgRot.Angle = 180.0 * [math]::Max(0.0, [math]::Min(1.0, 1.0 - (($f.mins5*60.0)/18000.0)))
 }
 Set-State $frames[0]
