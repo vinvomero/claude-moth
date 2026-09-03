@@ -20,6 +20,10 @@ light: the more you burn, the warmer it glows.
 The numbers come straight from Claude Code's own official usage feed, so they match the
 `/usage` screen exactly. Nothing is sent anywhere; everything runs on your PC.
 
+Moth has a sibling: [Cricket](https://github.com/vinvomero/claude-cricket) buzzes your
+phone the moment your coding agent finishes. Moth watches how much you've used; Cricket
+tells you when the work is done.
+
 ## Setup (one time)
 
 > **Just have the link?** Paste this whole repo URL to Claude Code and say *"install
