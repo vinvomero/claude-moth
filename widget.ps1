@@ -1100,6 +1100,12 @@ if ($SelfTest -or $Screenshot) {
             "Fable[vis {0}='{1}' {2} reset='{3}']" -f $PctF.Text, $FableLabel.Text, [math]::Round($FillF.Width,1), $ResetF.Text
         } else { "Fable[collapsed]" }
         $provDump = "Provider={0} Tab={1}" -f $script:activeProvider, $(if ($script:tabVisible) { 'visible' } else { 'hidden' })
+        # Halo is the cross-provider signal, so it has to be assertable without eyeballing
+        # a screenshot: it can be driven by a provider that is not even on screen.
+        $haloDump = if ($Card.Effect) {
+            "Halo={0}/{1:N2}" -f $Card.Effect.Color, $Card.Effect.Opacity
+        } else { "Halo=none" }
+        $provDump = "$provDump $haloDump"
         Write-Output ("SELFTEST OK | Pct5={0} Fill5W={1} Reset5='{2}' | Pct7={3} Fill7W={4} Reset7='{5}' | {6} | Win={7}x{8} | Opacity={9} | {10} | {11}" -f `
             $Pct5.Text, [math]::Round($Fill5.Width,1), $Reset5.Text, $Pct7.Text, [math]::Round($Fill7.Width,1), $Reset7.Text, $Updated.Text, [int]$ww, [int]$wh, $Card.Opacity, $fableDump, $provDump)
     }

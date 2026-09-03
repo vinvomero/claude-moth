@@ -1,0 +1,14 @@
+{
+    "five_hour":  {
+                      "used_percentage":  95,
+                      "resets_at":  1788452877,
+                      "window_mins":  300
+                  },
+    "seven_day":  {
+                      "used_percentage":  95,
+                      "resets_at":  1788852277,
+                      "window_mins":  10080
+                  },
+    "plan_type":  "team",
+    "captured_at":  1788445077
+}
