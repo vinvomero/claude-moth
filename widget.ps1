@@ -762,8 +762,12 @@ function Invoke-CodexPoll {
         # Hidden via ShellExecute (SW_HIDE), the same idiom as the token nudge: the console
         # is created already hidden rather than flashing and then hiding. No -Wait (that
         # would block the dispatcher) and no output redirection.
+        # QUOTE THE PATH. Start-Process joins -ArgumentList with spaces and does NOT quote,
+        # so an unquoted path containing a space (this repo lives under "Claude Projects")
+        # splits into two arguments and powershell.exe dies with 0xFFFD0000 before running
+        # anything - a launch that "succeeds" from here and silently never polls.
         $script:cxProc = Start-Process 'powershell.exe' -PassThru -WindowStyle Hidden -ArgumentList @(
-            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $codexHelper)
+            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $codexHelper + '"'))
         $script:cxStartedAt = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
         # Success resets the interval, not just the variable - restoring only the variable
         # once pinned polling at the backoff ceiling forever (the live_sync bug).
@@ -1144,11 +1148,15 @@ $win.Add_SourceInitialized({
     }
     Update-Display
     $poll.Start(); $tick.Start()
+    # Codex polling starts BEFORE the endpoint poll. Invoke-EndpointPoll runs
+    # synchronously here and can take up to its 15s timeout; anything after it is at the
+    # mercy of it returning cleanly, and a start that never happens is invisible.
+    # Starting a timer is instant, so it goes first.
+    # This is also the ONLY place polling starts, so a headless -SelfTest / -Screenshot
+    # run (which returns long before this) can never spawn a helper. The first poll is
+    # left to the timer rather than fired now: first paint must not wait on a spawn.
+    if ($CODEX_ON) { $cx.Start(); Write-ErrorLog 'codex: polling enabled' }
     if ($LIVE_SYNC_ON) { $ep.Start(); Invoke-EndpointPoll }   # immediate first fetch
-    # Codex polling starts here and nowhere else, so a headless -SelfTest / -Screenshot
-    # run (which returns before this point) can never spawn a helper. The first poll is
-    # deferred to the timer rather than fired now: first paint must not wait on a spawn.
-    if ($CODEX_ON) { $cx.Start() }
 })
 
 [void]$win.ShowDialog()
