@@ -1,4 +1,4 @@
-param([string]$SelfTest, [string]$Screenshot)
+param([string]$SelfTest, [string]$Screenshot, [string]$CodexFixture, [string]$Provider)
 # widget.ps1
 # Frameless, always-on-top desktop widget that shows real Claude Code usage
 # (5-hour + weekly) read from usage-cache.json. Native WPF via Windows PowerShell 5.1.
@@ -7,6 +7,10 @@ param([string]$SelfTest, [string]$Screenshot)
 #   -SelfTest <cache.json> | empty   render against a sample cache (or the no-cache
 #                                    state) and print a one-line state dump
 #   -Screenshot <out.png>            render the card to a PNG (uses the live cache)
+#   -CodexFixture <cache.json>       supply a Codex snapshot without polling Codex
+#   -Provider claude|codex           force which provider the dev render paints
+# Dev flags never start the timers (those live in SourceInitialized), so a headless
+# run can never spawn the Codex helper.
 
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 Add-Type -AssemblyName System.Windows.Forms   # Cursor::Position (absolute screen px) for drag-resize
@@ -431,67 +435,103 @@ function Update-Layout {
     } catch { }
 }
 
-function Update-Display {
-    $c = $script:cache
-    if (-not $c) {
-        $Updated.Text = 'waiting for Claude usage data...'
-        return
-    }
-    $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
-    $ageMin = [math]::Floor(($now - [long]$c.captured_at) / 60)
-    $stale  = $ageMin -ge [int]$cfg.stale_minutes
-    # STALE TREATMENT IS A SOLID-CARD TREATMENT, NEVER OPACITY. A dimmed card reads as
-    # "the widget is broken/transparent". Stale => bars desaturate to a muted grey-amber
-    # and the glow turns off; the card stays fully opaque and the label explains.
-    $STALE_BAR = '#8A7B5E'
+# STALE TREATMENT IS A SOLID-CARD TREATMENT, NEVER OPACITY. A dimmed card reads as
+# "the widget is broken/transparent". Stale => bars desaturate to a muted grey-amber
+# and the glow turns off; the card stays fully opaque and the label explains.
+$STALE_BAR = '#8A7B5E'
 
-    $p5 = [math]::Max(0, [math]::Min(100, ([double]$c.five_hour.used_percentage)))
-    $p7 = [math]::Max(0, [math]::Min(100, ([double]$c.seven_day.used_percentage)))
-    $Pct5.Text = ('{0}%' -f [math]::Round($p5))
-    $Pct7.Text = ('{0}%' -f [math]::Round($p7))
-    $script:p5 = $p5; $script:p7 = $p7   # Update-Layout turns these into fill widths (fluid)
-    $col5 = if ($stale) { $STALE_BAR } else { Get-BarColor $p5 }
-    $col7 = if ($stale) { $STALE_BAR } else { Get-BarColor $p7 }
+# Paint ONE provider view into the bars. Knows nothing about which provider it is or
+# which file the numbers came from - that is the whole point of the view.
+function Show-ProviderView($v) {
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+
+    $Pct5.Text = ('{0}%' -f [math]::Round($v.p5))
+    $script:p5 = $v.p5   # Update-Layout turns these into fill widths (fluid)
+    $col5 = if ($v.stale5) { $STALE_BAR } else { Get-BarColor $v.p5 }
     $Fill5.Background = [Windows.Media.BrushConverter]::new().ConvertFromString($col5)
+
+    # A provider can report no weekly bucket at all (some Codex plans). Show the bar as
+    # unknown rather than as a fresh 0%, which would read as "you have used nothing".
+    if ($null -eq $v.p7) {
+        $Pct7.Text = '--%'
+        $script:p7 = 0
+        $col7 = $STALE_BAR
+    } else {
+        $Pct7.Text = ('{0}%' -f [math]::Round($v.p7))
+        $script:p7 = $v.p7
+        $col7 = if ($v.stale7) { $STALE_BAR } else { Get-BarColor $v.p7 }
+    }
     $Fill7.Background = [Windows.Media.BrushConverter]::new().ConvertFromString($col7)
+
     # Bar glow: match the bar when fresh, off (transparent) when stale.
     try {
-        if ($Fill5.Effect) { $Fill5.Effect.Opacity = if ($stale) { 0.0 } else { 0.55 }; $Fill5.Effect.Color = [Windows.Media.ColorConverter]::ConvertFromString($col5) }
-        if ($Fill7.Effect) { $Fill7.Effect.Opacity = if ($stale) { 0.0 } else { 0.55 }; $Fill7.Effect.Color = [Windows.Media.ColorConverter]::ConvertFromString($col7) }
+        if ($Fill5.Effect) { $Fill5.Effect.Opacity = if ($v.stale5) { 0.0 } else { 0.55 }; $Fill5.Effect.Color = [Windows.Media.ColorConverter]::ConvertFromString($col5) }
+        if ($Fill7.Effect) { $Fill7.Effect.Opacity = if ($v.stale7 -or $null -eq $v.p7) { 0.0 } else { 0.55 }; $Fill7.Effect.Color = [Windows.Media.ColorConverter]::ConvertFromString($col7) }
     } catch { }
-    $Reset5.Text = Format-Remaining ([long]$c.five_hour.resets_at)
-    $Reset7.Text = Format-Remaining ([long]$c.seven_day.resets_at)
 
-    # Hourglass: rotate 0deg -> 180deg across the 5-hour window (18000s), recomputed on
-    # every 1s tick so it turns continuously. Hidden until real data exists (the no-cache
-    # branch above returns early). Muted (not hidden) when stale, matching the bars.
-    $secsLeft5 = [long]$c.five_hour.resets_at - $now
-    $frac5 = [math]::Max(0.0, [math]::Min(1.0, 1.0 - ([double]$secsLeft5 / 18000.0)))
-    $Hourglass5Rot.Angle = 180.0 * $frac5
-    $Hourglass5.Foreground = [Windows.Media.BrushConverter]::new().ConvertFromString($(if ($stale) { $STALE_BAR } else { '#B08D53' }))
-    $Hourglass5.Visibility = [Windows.Visibility]::Visible
+    # A null reset is legitimate (no window open yet at 0% used), so blank the countdown
+    # and park the hourglass rather than rendering an epoch-0 "resetting..." forever.
+    $Reset5.Text = if ($null -eq $v.r5) { '' } else { Format-Remaining ([long]$v.r5) }
+    $Reset7.Text = if ($null -eq $v.r7) { '' } else { Format-Remaining ([long]$v.r7) }
 
-    # Per-model weekly bar - rendered only when the cache carries a fable bucket.
-    # This bucket has its OWN timestamp: the statusLine capture carries it forward
-    # unchanged while refreshing the top-level captured_at, so it can go stale on its
-    # own. Grey it when it does, so a frozen value is never shown in full amber.
-    if ($c.fable -and $null -ne $c.fable.used_percentage) {
-        $pf = [math]::Max(0, [math]::Min(100, ([double]$c.fable.used_percentage)))
-        $fableStale = $stale
-        if (Test-Numeric $c.fable.captured_at) {
-            $fableStale = ([math]::Floor(($now - [long]$c.fable.captured_at) / 60)) -ge [int]$cfg.stale_minutes
-        }
+    # Hourglass: rotate 0deg -> 180deg across the 5-hour window, recomputed on every 1s
+    # tick so it turns continuously. Muted (not hidden) when stale, matching the bars.
+    if ($null -eq $v.r5) {
+        $Hourglass5.Visibility = [Windows.Visibility]::Collapsed
+    } else {
+        $secsLeft5 = [long]$v.r5 - $now
+        $frac5 = [math]::Max(0.0, [math]::Min(1.0, 1.0 - ([double]$secsLeft5 / [double]$v.window5Secs)))
+        $Hourglass5Rot.Angle = 180.0 * $frac5
+        $Hourglass5.Foreground = [Windows.Media.BrushConverter]::new().ConvertFromString($(if ($v.stale5) { $STALE_BAR } else { '#B08D53' }))
+        $Hourglass5.Visibility = [Windows.Visibility]::Visible
+    }
+
+    # Per-model weekly bar - Claude-only, and only when that cache carries the bucket.
+    # It has its OWN timestamp: the statusLine capture carries it forward unchanged while
+    # refreshing the top-level captured_at, so a frozen value must never show in amber.
+    if ($v.fable) {
+        $pf = [math]::Max(0, [math]::Min(100, ([double]$v.fable.used_percentage)))
         $PctF.Text = ('{0}%' -f [math]::Round($pf))
         $script:pf = $pf
-        $FillF.Background = [Windows.Media.BrushConverter]::new().ConvertFromString($(if ($fableStale) { $STALE_BAR } else { '#E8A34C' }))
-        if ($c.fable.label) { $FableLabel.Text = ('{0} (weekly)' -f $c.fable.label) }
-        if ($c.fable.resets_at) { $ResetF.Text = Format-Remaining ([long]$c.fable.resets_at) }
+        $FillF.Background = [Windows.Media.BrushConverter]::new().ConvertFromString($(if ($v.fableStale) { $STALE_BAR } else { '#E8A34C' }))
+        if ($v.fable.label) { $FableLabel.Text = ('{0} (weekly)' -f $v.fable.label) }
+        if ($v.fable.resets_at) { $ResetF.Text = Format-Remaining ([long]$v.fable.resets_at) }
         $FableGroup.Visibility = [Windows.Visibility]::Visible
     } else {
         $script:pf = 0
         $FableGroup.Visibility = [Windows.Visibility]::Collapsed
     }
     Update-Layout   # size the (stretchable) bars to the current width + height
+}
+
+# Which provider the card is currently painting, and whether the switch tab is shown.
+# Set by Update-Display; read by the dev dump and (from U4) the tab handlers.
+$script:activeProvider = 'claude'
+$script:tabVisible = $false
+$script:forcedProvider = $null
+$script:codexCache = $null
+
+function Update-Display {
+    # Views are rebuilt every tick, not every poll: staleness and the countdowns have to
+    # advance once a second. This is pure in-memory transformation - the caches
+    # themselves are read on the poll tick.
+    $views = @{}
+    $cv = ConvertTo-ProviderView 'claude' $script:cache
+    if ($cv) { $views['claude'] = $cv }
+    $script:views = $views
+
+    $v = $views['claude']
+    if (-not $v) {
+        $Updated.Text = 'waiting for Claude usage data...'
+        return
+    }
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    $ageMin = [math]::Floor(($now - $v.capturedAt) / 60)
+    $stale  = $v.stale5
+    $p5 = $v.p5
+    $p7 = if ($null -eq $v.p7) { 0 } else { $v.p7 }
+
+    Show-ProviderView $v
 
     # Card is ALWAYS fully opaque - staleness lives in the bars + label, never opacity.
     $Card.Opacity = 1.0
@@ -815,6 +855,12 @@ $win.Add_StateChanged({
 if ($SelfTest -or $Screenshot) {
     if ($SelfTest -and $SelfTest -ne 'empty') { $script:cache = (Get-Content $SelfTest -Raw | ConvertFrom-Json) }
     elseif ($Screenshot -and (Test-Path $cacheFile)) { $script:cache = (Get-Content $cacheFile -Raw | ConvertFrom-Json) }
+    # Codex side: an explicit fixture, else the live Codex cache for -Screenshot. Loaded
+    # raw the same way the Claude cache is, so a fixture can exercise shapes Read-CodexCache
+    # would reject.
+    if ($CodexFixture -and $CodexFixture -ne 'empty') { $script:codexCache = (Get-Content $CodexFixture -Raw | ConvertFrom-Json) }
+    elseif ($Screenshot -and (Test-Path $codexCacheFile)) { $script:codexCache = (Get-Content $codexCacheFile -Raw | ConvertFrom-Json) }
+    if ($Provider) { $script:forcedProvider = $Provider }
     # The window is never shown here, so nothing lays it out. Detach the content and force a
     # layout pass at the window size so the fluid bars (and ActualWidth) are real.
     $ww = [double]$win.Width; $wh = [double]$win.Height
@@ -827,8 +873,9 @@ if ($SelfTest -or $Screenshot) {
         $fableDump = if ($FableGroup.Visibility -eq [Windows.Visibility]::Visible) {
             "Fable[vis {0}='{1}' {2} reset='{3}']" -f $PctF.Text, $FableLabel.Text, [math]::Round($FillF.Width,1), $ResetF.Text
         } else { "Fable[collapsed]" }
-        Write-Output ("SELFTEST OK | Pct5={0} Fill5W={1} Reset5='{2}' | Pct7={3} Fill7W={4} Reset7='{5}' | {6} | Win={7}x{8} | Opacity={9} | {10}" -f `
-            $Pct5.Text, [math]::Round($Fill5.Width,1), $Reset5.Text, $Pct7.Text, [math]::Round($Fill7.Width,1), $Reset7.Text, $Updated.Text, [int]$ww, [int]$wh, $Card.Opacity, $fableDump)
+        $provDump = "Provider={0} Tab={1}" -f $script:activeProvider, $(if ($script:tabVisible) { 'visible' } else { 'hidden' })
+        Write-Output ("SELFTEST OK | Pct5={0} Fill5W={1} Reset5='{2}' | Pct7={3} Fill7W={4} Reset7='{5}' | {6} | Win={7}x{8} | Opacity={9} | {10} | {11}" -f `
+            $Pct5.Text, [math]::Round($Fill5.Width,1), $Reset5.Text, $Pct7.Text, [math]::Round($Fill7.Width,1), $Reset7.Text, $Updated.Text, [int]$ww, [int]$wh, $Card.Opacity, $fableDump, $provDump)
     }
     if ($Screenshot) {
         $Card.Opacity = 1.0
