@@ -45,6 +45,15 @@ if (Test-Path $stateFile) {
         # live_sync is the current name; fable_bar is the old one, still honored.
         if ($null -ne $st.live_sync)   { $cfg.live_sync   = $st.live_sync }
         elseif ($null -ne $st.fable_bar) { $cfg.live_sync = $st.fable_bar }
+        # Codex as a second provider - opt-in, same shape as live_sync. Keys read here
+        # or they are invisible to the widget: this merge is an explicit allow-list, not
+        # a wholesale copy.
+        if ($null -ne $st.codex)     { $cfg.codex     = $st.codex }
+        if ($null -ne $st.codex_exe) { $cfg.codex_exe = $st.codex_exe }
+        # Manual provider pick and when it was made. Both are needed: the pick holds only
+        # until the OTHER provider shows activity newer than the pick.
+        if ($null -ne $st.provider)          { $cfg.provider          = $st.provider }
+        if ($null -ne $st.provider_picked_at) { $cfg.provider_picked_at = $st.provider_picked_at }
     } catch { }
 }
 # Opt-in live sync via the oauth/usage endpoint (undocumented; see README). This is
@@ -53,6 +62,15 @@ if (Test-Path $stateFile) {
 # live_sync wins whenever it is set at all - so an explicit `live_sync: false` overrides
 # a stale legacy `fable_bar: true`. Fall back to the old key only when live_sync is absent.
 $LIVE_SYNC_ON = if ($null -ne $cfg.live_sync) { $cfg.live_sync -eq $true } else { $cfg.fable_bar -eq $true }
+# Opt-in Codex provider. When off the widget behaves exactly as it always has: Claude
+# only, no provider tab, and capture-codex.ps1 is never spawned.
+$CODEX_ON = ($cfg.codex -eq $true)
+# Both Codex runtime files live outside the repo: the repo is OneDrive-synced, which
+# rewrites mtimes (forging the activity signal) and churns on a 3-minute rewrite.
+$MOTH_DATA_DIR  = Join-Path $env:LOCALAPPDATA 'Moth'
+$codexCacheFile = Join-Path $MOTH_DATA_DIR 'codex-cache.json'
+$activityFile   = Join-Path $MOTH_DATA_DIR 'activity.json'
+$codexHelper    = Join-Path $root 'capture-codex.ps1'
 # Coerce every numeric setting back to a real number (the README invites hand-edits),
 # then clamp the ones where a bad range breaks the widget: a 0/negative timer interval
 # is a busy loop, and a non-positive track width kills the XAML parse.
@@ -258,6 +276,107 @@ function Read-Cache {
         $c.PSObject.Properties.Remove('fable')
     }
     return $c
+}
+
+# The Codex cache is written by capture-codex.ps1 and has a DIFFERENT contract to the
+# Claude one, even though it borrows the same field names so the helper can reuse the
+# shared parsers: only five_hour is required (some plans report no weekly bucket at
+# all), and a null resets_at is legitimate rather than corrupt - at 0% used there is no
+# open window to reset. Only Read-CodexCache knows this file's fields; everything
+# downstream consumes the provider view built from it.
+function Read-CodexCache {
+    if (-not (Test-Path $codexCacheFile)) { return $null }
+    try { $c = Get-Content $codexCacheFile -Raw | ConvertFrom-Json } catch { return $null }
+    if (-not $c.five_hour) { return $null }
+    if (-not (Test-Numeric $c.five_hour.used_percentage)) { return $null }
+    if (-not (Test-Numeric $c.captured_at)) { return $null }
+    # Weekly is optional; drop just that bucket when it is malformed.
+    if ($c.seven_day -and -not (Test-Numeric $c.seven_day.used_percentage)) {
+        $c.PSObject.Properties.Remove('seven_day')
+    }
+    return $c
+}
+
+# Per-provider "the user actually did something" stamps, written by touch-activity.ps1.
+# Deliberately NOT derived from either usage cache: the statusLine rewrites captured_at
+# every ~15s while a Claude session is merely open, and the live_sync poll rewrites it
+# every 3 minutes with no session at all - auto-following that would yank the card back
+# to Claude seconds after every Codex turn.
+#
+# Codex has no hook entry installed (whether the desktop app fires them is unconfirmed),
+# so its stamp comes from the newest sessions rollout file, which only grows on real
+# turns. logs_2.sqlite-wal is deliberately NOT used: it advances on its own roughly
+# every 12 seconds, so it is a heartbeat, not activity.
+$script:codexRolloutDir = Join-Path $env:USERPROFILE '.codex\sessions'
+function Read-Activity {
+    $claude = $null; $codex = $null
+    if (Test-Path $activityFile) {
+        try {
+            $a = Get-Content $activityFile -Raw | ConvertFrom-Json
+            if (Test-Numeric $a.claude) { $claude = [long]$a.claude }
+            if (Test-Numeric $a.codex)  { $codex  = [long]$a.codex }
+        } catch { }
+    }
+    if ($null -eq $codex -and (Test-Path $script:codexRolloutDir)) {
+        try {
+            $newest = Get-ChildItem $script:codexRolloutDir -Recurse -Filter 'rollout-*.jsonl' -File -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+            if ($newest) { $codex = [long][DateTimeOffset]::new($newest.LastWriteTimeUtc, [TimeSpan]::Zero).ToUnixTimeSeconds() }
+        } catch { }
+    }
+    # A stamp from the future (clock step, hand edit) would pin the pick forever.
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    if ($null -ne $claude -and $claude -gt $now) { $claude = $now }
+    if ($null -ne $codex  -and $codex  -gt $now) { $codex  = $now }
+    return [pscustomobject]@{ claude = $claude; codex = $codex }
+}
+
+# Flatten either cache into ONE shape the paint path and the halo consume, so neither
+# has to know which provider it is looking at or which file the numbers came from.
+# Each bucket carries its own freshness (the pattern the per-model bar already used),
+# because the two providers go stale independently.
+function ConvertTo-ProviderView($provider, $c) {
+    if ($null -eq $c) { return $null }
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    $staleSecs = [int]$cfg.stale_minutes * 60
+
+    $capturedAt = [long]$c.captured_at
+    $baseStale = (($now - $capturedAt) -ge $staleSecs)
+
+    $v = [pscustomobject]@{
+        provider    = $provider
+        p5          = [math]::Max(0, [math]::Min(100, [double]$c.five_hour.used_percentage))
+        r5          = $null
+        p7          = $null
+        r7          = $null
+        stale5      = $baseStale
+        stale7      = $baseStale
+        window5Secs = 18000.0
+        fable       = $null
+        fableStale  = $baseStale
+        capturedAt  = $capturedAt
+        lastError   = $null
+    }
+    if (Test-Numeric $c.five_hour.resets_at) { $v.r5 = [long]$c.five_hour.resets_at }
+    if (Test-Numeric $c.five_hour.window_mins) {
+        $w = [double]$c.five_hour.window_mins * 60.0
+        if ($w -gt 0) { $v.window5Secs = $w }
+    }
+    if ($c.seven_day -and (Test-Numeric $c.seven_day.used_percentage)) {
+        $v.p7 = [math]::Max(0, [math]::Min(100, [double]$c.seven_day.used_percentage))
+        if (Test-Numeric $c.seven_day.resets_at) { $v.r7 = [long]$c.seven_day.resets_at }
+    }
+    # Per-model bar is a Claude-only concept and carries its own timestamp, because the
+    # statusLine writer carries the bucket forward untouched while refreshing the
+    # top-level captured_at - a frozen value must not render as live.
+    if ($c.fable -and (Test-Numeric $c.fable.used_percentage)) {
+        $v.fable = $c.fable
+        if (Test-Numeric $c.fable.captured_at) {
+            $v.fableStale = ((($now - [long]$c.fable.captured_at)) -ge $staleSecs)
+        }
+    }
+    if ($c.last_error) { $v.lastError = $c.last_error }
+    return $v
 }
 
 $script:lastSavedPos = $null
