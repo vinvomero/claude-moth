@@ -34,8 +34,13 @@ Check 'codex used more recently'  (Resolve-ProviderState $true $true $T ($T+50) 
 Check 'claude used more recently' (Resolve-ProviderState $true $true ($T+50) $T $null $null) 'claude|True|False'
 Check 'tie -> claude (incumbent)' (Resolve-ProviderState $true $true $T $T       $null $null) 'claude|True|False'
 Check 'both missing -> claude'    (Resolve-ProviderState $true $true $null $null $null $null) 'claude|True|False'
-Check 'only codex ever seen'      (Resolve-ProviderState $true $true $null $T    $null $null) 'codex|True|False'
+# Auto-follow needs BOTH stamps. Codex always has one (rollout files), Claude only once
+# its hook is installed - so a missing Claude stamp must not hand the card to Codex
+# permanently and silently turn a Claude widget into a Codex-only one.
+Check 'only codex ever seen'      (Resolve-ProviderState $true $true $null $T    $null $null) 'claude|True|False'
 Check 'only claude ever seen'     (Resolve-ProviderState $true $true $T $null    $null $null) 'claude|True|False'
+# ...but the tab still works in that state, and the pick still holds.
+Check 'no claude signal, picked codex' (Resolve-ProviderState $true $true $null $T 'codex' ($T+10)) 'codex|True|False'
 
 Write-Host "`n-- manual pick holds until the OTHER tool is used --"
 Check 'pick claude, no codex use' (Resolve-ProviderState $true $true ($T+90) ($T-10) 'claude' $T) 'claude|True|False'
@@ -48,7 +53,9 @@ Check 'cleared, then back to claude' (Resolve-ProviderState $true $true ($T+90) 
 Check 'cleared, then back to codex'  (Resolve-ProviderState $true $true ($T+10) ($T+90) 'codex' $T)  'codex|True|True'
 Check 'pick survives restart'     (Resolve-ProviderState $true $true $null $null 'codex' $T)      'codex|True|False'
 Check 'activity exactly at pick'  (Resolve-ProviderState $true $true ($T+90) $T 'claude' $T)      'claude|True|False'
-Check 'pick with null pickedAt'   (Resolve-ProviderState $true $true $null ($T+10) 'claude' $null) 'codex|True|True'
+# Pick cleared by Codex use, but with no Claude stamp to compare against, the incumbent
+# keeps the card rather than the clear handing it to Codex.
+Check 'pick with null pickedAt'   (Resolve-ProviderState $true $true $null ($T+10) 'claude' $null) 'claude|True|True'
 Check 'garbage pick ignored'      (Resolve-ProviderState $true $true $T ($T+50) 'banana' $T)      'codex|True|False'
 
 Write-Host "`n-- a data refresh is not activity (the whole reason for a separate signal) --"

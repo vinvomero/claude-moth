@@ -540,9 +540,13 @@ function Resolve-ProviderState($codexOn, $codexPresent, $tClaude, $tCodex, $pick
             return [pscustomobject]@{ provider = $pick; tabVisible = $true; pick = $pick; pickedAt = $pickedAt; changed = $false }
         }
     }
-    $c = if ($null -eq $tClaude) { -1 } else { [long]$tClaude }
-    $x = if ($null -eq $tCodex)  { -1 } else { [long]$tCodex }
-    $provider = if ($x -gt $c) { 'codex' } else { 'claude' }
+    # Auto-follow needs a comparable PAIR of stamps. Codex always has one (its rollout
+    # files), but Claude's only exists once its hook is installed - and a missing stamp
+    # would lose every comparison, pinning the card to Codex forever and silently turning
+    # a Claude widget into a Codex-only one. With one side unknown, keep the incumbent and
+    # let the tab be the mechanism; auto-follow starts working when both signals exist.
+    $provider = 'claude'
+    if ($null -ne $tClaude -and $null -ne $tCodex -and [long]$tCodex -gt [long]$tClaude) { $provider = 'codex' }
     return [pscustomobject]@{ provider = $provider; tabVisible = $true; pick = $null; pickedAt = $null; changed = $changed }
 }
 
