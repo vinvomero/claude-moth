@@ -709,7 +709,15 @@ $poll.Interval = [TimeSpan]::FromSeconds([double]$cfg.poll_seconds)
 # are pure in-memory work so a provider switch can never cost disk I/O once a second.
 $poll.Add_Tick({
     $script:cache = Read-Cache
-    if ($CODEX_ON) { $script:codexCache = Read-CodexCache; $script:activity = Read-Activity }
+    if ($CODEX_ON) {
+        $script:codexCache = Read-CodexCache
+        $script:activity = Read-Activity
+        # A Codex turn just landed: refresh now instead of waiting out the Codex interval,
+        # so the bars lag a turn by one poll tick rather than by up to three minutes.
+        if ($null -ne $script:activity.codex -and $null -ne $script:cxLastActivity -and
+            $script:activity.codex -gt $script:cxLastActivity) { Invoke-CodexPoll }
+        $script:cxLastActivity = $script:activity.codex
+    }
     Update-Display
     Save-WindowState
 })
@@ -717,6 +725,58 @@ $poll.Add_Tick({
 $tick = New-Object Windows.Threading.DispatcherTimer
 $tick.Interval = [TimeSpan]::FromSeconds(1)
 $tick.Add_Tick({ if ($script:cache -or $script:codexCache) { Update-Display } })
+
+# ---- Codex poll (opt-in): fire-and-forget the helper, never talk to Codex from here ----
+# Every timer here runs on the WPF dispatcher thread, so anything that blocks freezes the
+# card. Talking to `codex app-server` means a process spawn plus a live backend call - so
+# the widget only LAUNCHES capture-codex.ps1 and reads the cache it publishes. The helper
+# owns the exchange, its own 8s deadline, and killing its child.
+$CX_BASE_SECONDS = 180
+$script:cxBackoff = $CX_BASE_SECONDS
+$script:cxProc = $null
+$script:cxStartedAt = $null
+$script:cxLastActivity = $null
+
+function Invoke-CodexPoll {
+    try {
+        # Still running from last time? Skip rather than stack helpers. The helper also
+        # holds a named mutex, which covers the case where a widget restart forgot the
+        # in-flight child.
+        if ($script:cxProc -and -not $script:cxProc.HasExited) {
+            $ageSec = ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - $script:cxStartedAt)
+            # The helper's own deadline is the real bound; this is the anomaly path for a
+            # helper that somehow outlived it. .NET Framework has no process-tree kill, so
+            # use taskkill /T to make sure its codex.exe child goes too.
+            if ($ageSec -gt 30) {
+                Write-ErrorLog ("codex: helper still running after {0}s - terminating tree" -f $ageSec)
+                try { Start-Process 'taskkill.exe' -ArgumentList '/PID', $script:cxProc.Id, '/T', '/F' -WindowStyle Hidden -ErrorAction SilentlyContinue } catch { }
+                $script:cxProc = $null
+            }
+            return
+        }
+        if (-not (Test-Path $codexHelper)) { return }
+        # Hidden via ShellExecute (SW_HIDE), the same idiom as the token nudge: the console
+        # is created already hidden rather than flashing and then hiding. No -Wait (that
+        # would block the dispatcher) and no output redirection.
+        $script:cxProc = Start-Process 'powershell.exe' -PassThru -WindowStyle Hidden -ArgumentList @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $codexHelper)
+        $script:cxStartedAt = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        # Success resets the interval, not just the variable - restoring only the variable
+        # once pinned polling at the backoff ceiling forever (the live_sync bug).
+        $script:cxBackoff = $CX_BASE_SECONDS
+        $cx.Interval = [TimeSpan]::FromSeconds($CX_BASE_SECONDS)
+    } catch {
+        Write-ErrorLog ("codex: could not launch helper - " + $_.Exception.Message)
+        # Back off, but never past the point where a HEALTHY provider would look stale.
+        $ceiling = [math]::Max($CX_BASE_SECONDS, ([int]$cfg.stale_minutes * 60) - 60)
+        $script:cxBackoff = [math]::Min($ceiling, $script:cxBackoff * 2)
+        $cx.Interval = [TimeSpan]::FromSeconds($script:cxBackoff)
+    }
+}
+
+$cx = New-Object Windows.Threading.DispatcherTimer
+$cx.Interval = [TimeSpan]::FromSeconds($CX_BASE_SECONDS)
+$cx.Add_Tick({ Invoke-CodexPoll })
 
 # ---- live sync: oauth/usage endpoint poll (PRIMARY source for desktop-app users) ----
 # The desktop app never runs the statusLine feed, so this endpoint is the only way to
@@ -1071,10 +1131,20 @@ $win.Add_SourceInitialized({
     $script:cache = Read-Cache
     # Read the Codex side once before first paint so the card OPENS on the right provider
     # rather than flipping to it up to a poll interval later.
-    if ($CODEX_ON) { $script:codexCache = Read-CodexCache; $script:activity = Read-Activity }
+    if ($CODEX_ON) {
+        $script:codexCache = Read-CodexCache
+        $script:activity = Read-Activity
+        # Seed from the file so the first poll tick does not read an "advance" that is
+        # really just the first read and fire a spurious immediate poll.
+        $script:cxLastActivity = $script:activity.codex
+    }
     Update-Display
     $poll.Start(); $tick.Start()
     if ($LIVE_SYNC_ON) { $ep.Start(); Invoke-EndpointPoll }   # immediate first fetch
+    # Codex polling starts here and nowhere else, so a headless -SelfTest / -Screenshot
+    # run (which returns before this point) can never spawn a helper. The first poll is
+    # deferred to the timer rather than fired now: first paint must not wait on a spawn.
+    if ($CODEX_ON) { $cx.Start() }
 })
 
 [void]$win.ShowDialog()
