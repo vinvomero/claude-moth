@@ -119,6 +119,19 @@ $xaml = @"
           </Canvas>
           <TextBlock Text="Moth" Foreground="#F5E9D5" FontFamily="Segoe UI" FontSize="12" FontWeight="SemiBold"
                      VerticalAlignment="Center"/>
+          <!-- Provider switch. Collapsed entirely until a second provider has data, so
+               the Claude-only card is untouched. Sits in the drag area, so the handlers
+               mark the event Handled on BUTTON-DOWN like MinBtn/CloseBtn - an Up-based
+               click never fires because DragMove swallows the mouse-up. -->
+          <StackPanel x:Name="TabGroup" Orientation="Horizontal" VerticalAlignment="Center"
+                      Margin="8,0,0,0" Visibility="Collapsed">
+            <TextBlock x:Name="TabClaude" Text="Claude" FontFamily="Segoe UI" FontSize="11"
+                       Foreground="#6E6552" Cursor="Hand" VerticalAlignment="Center"/>
+            <TextBlock Text="/" FontFamily="Segoe UI" FontSize="11" Foreground="#3A362C"
+                       Margin="4,0,4,0" VerticalAlignment="Center"/>
+            <TextBlock x:Name="TabCodex" Text="Codex" FontFamily="Segoe UI" FontSize="11"
+                       Foreground="#6E6552" Cursor="Hand" VerticalAlignment="Center"/>
+          </StackPanel>
         </StackPanel>
         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
           <TextBlock x:Name="MinBtn" Text="&#8211;" Foreground="#5A5240" FontFamily="Segoe UI" FontSize="16"
@@ -209,6 +222,7 @@ $Pct5    = $win.FindName('Pct5');  $Fill5 = $win.FindName('Fill5');  $Reset5 = $
 $Hourglass5 = $win.FindName('Hourglass5'); $Hourglass5Rot = $win.FindName('Hourglass5Rot')
 $Pct7    = $win.FindName('Pct7');  $Fill7 = $win.FindName('Fill7');  $Reset7 = $win.FindName('Reset7')
 $FableGroup = $win.FindName('FableGroup'); $FableLabel = $win.FindName('FableLabel')
+$TabGroup = $win.FindName('TabGroup'); $TabClaude = $win.FindName('TabClaude'); $TabCodex = $win.FindName('TabCodex')
 $PctF    = $win.FindName('PctF');  $FillF = $win.FindName('FillF');  $ResetF = $win.FindName('ResetF')
 $Updated = $win.FindName('Updated')
 $BarsPanel = $win.FindName('BarsPanel')
@@ -504,12 +518,66 @@ function Show-ProviderView($v) {
     Update-Layout   # size the (stretchable) bars to the current width + height
 }
 
+# Pure reducer for "which provider should the card show". No I/O, no side effects: the
+# CALLER persists when it reports changed, which keeps this fixture-testable and keeps
+# selection out of the once-a-second paint path.
+#
+# Activity here means a turn/session event (see Read-Activity), never a data refresh.
+# Ties and missing stamps resolve to Claude, the incumbent - a card that flips on a
+# coin-toss at startup is worse than one that is predictably wrong.
+function Resolve-ProviderState($codexOn, $codexPresent, $tClaude, $tCodex, $pick, $pickedAt) {
+    if (-not $codexOn -or -not $codexPresent) {
+        return [pscustomobject]@{ provider = 'claude'; tabVisible = $false; pick = $pick; pickedAt = $pickedAt; changed = $false }
+    }
+    $changed = $false
+    if ($pick -eq 'claude' -or $pick -eq 'codex') {
+        $otherStamp = if ($pick -eq 'claude') { $tCodex } else { $tClaude }
+        $since = if ($null -eq $pickedAt) { 0 } else { [long]$pickedAt }
+        if ($null -ne $otherStamp -and [long]$otherStamp -gt $since) {
+            # The other tool has been used since the pick was made: auto-follow resumes.
+            $changed = $true
+        } else {
+            return [pscustomobject]@{ provider = $pick; tabVisible = $true; pick = $pick; pickedAt = $pickedAt; changed = $false }
+        }
+    }
+    $c = if ($null -eq $tClaude) { -1 } else { [long]$tClaude }
+    $x = if ($null -eq $tCodex)  { -1 } else { [long]$tCodex }
+    $provider = if ($x -gt $c) { 'codex' } else { 'claude' }
+    return [pscustomobject]@{ provider = $provider; tabVisible = $true; pick = $null; pickedAt = $null; changed = $changed }
+}
+
+# Persist the manual pick without touching the size/position keys. Save-WindowState only
+# writes when the POSITION changed, so the pick needs its own read-merge-write.
+function Save-ProviderPick($pick, $pickedAt) {
+    try {
+        $obj = @{}
+        if (Test-Path $stateFile) {
+            try { (Get-Content $stateFile -Raw | ConvertFrom-Json).psobject.Properties | ForEach-Object { $obj[$_.Name] = $_.Value } } catch { }
+        }
+        if ($null -eq $pick) {
+            $obj.Remove('provider') | Out-Null
+            $obj.Remove('provider_picked_at') | Out-Null
+        } else {
+            $obj['provider'] = $pick
+            $obj['provider_picked_at'] = [long]$pickedAt
+        }
+        Write-Utf8NoBom $stateFile (([pscustomobject]$obj) | ConvertTo-Json -Depth 10)
+    } catch { Write-ErrorLog ("could not persist provider pick - " + $_.Exception.Message) }
+}
+
 # Which provider the card is currently painting, and whether the switch tab is shown.
 # Set by Update-Display; read by the dev dump and (from U4) the tab handlers.
 $script:activeProvider = 'claude'
 $script:tabVisible = $false
 $script:forcedProvider = $null
 $script:codexCache = $null
+$script:tabColClaude = $null
+$script:tabColCodex = $null
+# Manual pick, seeded from the gitignored per-user state and mutated by the tab.
+$script:pick = $(if ($cfg.provider -eq 'claude' -or $cfg.provider -eq 'codex') { [string]$cfg.provider } else { $null })
+$script:pickedAt = $(if (Test-Numeric $cfg.provider_picked_at) { [long]$cfg.provider_picked_at } else { $null })
+# Activity stamps, refreshed by the poll tick - never read from disk in the 1s paint path.
+$script:activity = [pscustomobject]@{ claude = $null; codex = $null }
 
 function Update-Display {
     # Views are rebuilt every tick, not every poll: staleness and the countdowns have to
@@ -518,20 +586,61 @@ function Update-Display {
     $views = @{}
     $cv = ConvertTo-ProviderView 'claude' $script:cache
     if ($cv) { $views['claude'] = $cv }
+    if ($CODEX_ON -or $script:forcedProvider) {
+        $xv = ConvertTo-ProviderView 'codex' $script:codexCache
+        if ($xv) { $views['codex'] = $xv }
+    }
     $script:views = $views
 
-    $v = $views['claude']
+    # Selection is a pure reducer over values already in memory. When it clears a pick,
+    # THIS caller persists the clear - the reducer itself stays side-effect free.
+    $r = Resolve-ProviderState $CODEX_ON ($null -ne $views['codex']) `
+            $script:activity.claude $script:activity.codex $script:pick $script:pickedAt
+    if ($r.changed) {
+        $script:pick = $r.pick; $script:pickedAt = $r.pickedAt
+        Save-ProviderPick $r.pick $r.pickedAt
+    }
+    $active = $r.provider
+    if ($script:forcedProvider) { $active = $script:forcedProvider }  # dev render override
+    $script:activeProvider = $active
+    $script:tabVisible = $r.tabVisible
+
+    # The data gate is "does ANY provider have a view", not "is the Claude cache loaded" -
+    # otherwise a Codex-only card would never advance its countdown.
+    $v = $views[$active]
+    if (-not $v -and $views['claude']) { $v = $views['claude']; $active = 'claude'; $script:activeProvider = 'claude' }
     if (-not $v) {
         $Updated.Text = 'waiting for Claude usage data...'
+        $TabGroup.Visibility = [Windows.Visibility]::Collapsed
         return
     }
     $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     $ageMin = [math]::Floor(($now - $v.capturedAt) / 60)
     $stale  = $v.stale5
-    $p5 = $v.p5
-    $p7 = if ($null -eq $v.p7) { 0 } else { $v.p7 }
 
     Show-ProviderView $v
+
+    # Tab: only once a second provider actually has data, so the Claude-only card is
+    # untouched. Brushes are set on change only - this runs once a second.
+    $tabVis = if ($script:tabVisible) { [Windows.Visibility]::Visible } else { [Windows.Visibility]::Collapsed }
+    if ($TabGroup.Visibility -ne $tabVis) { $TabGroup.Visibility = $tabVis }
+    if ($script:tabVisible) {
+        # "Claude" and "Codex" both start with C, so a single-letter abbreviation would
+        # render two identical tabs at exactly the width where it kicks in.
+        $narrow = ([double]$win.Width -lt 260.0)
+        $lblC = if ($narrow) { 'Cl' } else { 'Claude' }
+        $lblX = if ($narrow) { 'Co' } else { 'Codex' }
+        if ($TabClaude.Text -ne $lblC) { $TabClaude.Text = $lblC }
+        if ($TabCodex.Text  -ne $lblX) { $TabCodex.Text  = $lblX }
+        $cCol = if ($active -eq 'claude') { '#F5E9D5' } else { '#6E6552' }
+        $xCol = if ($active -eq 'codex')  { '#F5E9D5' } else { '#6E6552' }
+        if ($script:tabColClaude -ne $cCol) {
+            $TabClaude.Foreground = [Windows.Media.BrushConverter]::new().ConvertFromString($cCol); $script:tabColClaude = $cCol
+        }
+        if ($script:tabColCodex -ne $xCol) {
+            $TabCodex.Foreground = [Windows.Media.BrushConverter]::new().ConvertFromString($xCol); $script:tabColCodex = $xCol
+        }
+    }
 
     # Card is ALWAYS fully opaque - staleness lives in the bars + label, never opacity.
     $Card.Opacity = 1.0
@@ -539,10 +648,21 @@ function Update-Display {
     # soft amber when you're fine, warming to orange/red and brightening as you near a
     # limit ("the flame rising"). Blur stays fixed (<= inset margin) so corners never clip;
     # only colour + opacity change. Muted grey + dim when stale, matching the bars.
+    # It tracks the hottest limit across BOTH providers, so it can warn about the one you
+    # are not looking at - the tab is how you find out which. Only FRESH buckets count: a
+    # frozen snapshot must not hold the card red for days (the per-model bar used to).
     try {
         if ($Card.Effect) {
-            $heat = [math]::Max($p5, [math]::Max($p7, [double]$script:pf))
-            if ($stale) {
+            $heat = $null
+            foreach ($pv in $views.Values) {
+                if (-not $pv.stale5) { if ($null -eq $heat -or $pv.p5 -gt $heat) { $heat = $pv.p5 } }
+                if ($null -ne $pv.p7 -and -not $pv.stale7) { if ($null -eq $heat -or $pv.p7 -gt $heat) { $heat = $pv.p7 } }
+                if ($pv.fable -and -not $pv.fableStale) {
+                    $pfv = [double]$pv.fable.used_percentage
+                    if ($null -eq $heat -or $pfv -gt $heat) { $heat = $pfv }
+                }
+            }
+            if ($null -eq $heat) {
                 $Card.Effect.Color   = [Windows.Media.ColorConverter]::ConvertFromString($STALE_BAR)
                 $Card.Effect.Opacity = 0.12
             } else {
@@ -551,7 +671,19 @@ function Update-Display {
             }
         }
     } catch { }
-    if ($script:epExpired -and $stale) {
+    # Status text belongs to the VISIBLE provider. A Claude token hint printed under
+    # Codex bars would tell the user to fix something unrelated to what they can see.
+    if ($active -eq 'codex') {
+        $cls = if ($v.lastError) { [string]$v.lastError.class } else { '' }
+        if ($cls -eq 'binary-missing')  { $Updated.Text = 'Codex app-server not found' }
+        elseif ($cls -eq 'rpc-error')   { $Updated.Text = 'sign in to Codex to sync' }
+        elseif ($cls -eq 'timeout')     { $Updated.Text = 'codex: poll timed out' }
+        elseif ($stale) {
+            $Updated.Text = if ($ageMin -ge 60) { ('codex: last synced {0}h ago' -f [math]::Floor($ageMin/60)) } else { ('codex: last synced {0}m ago' -f $ageMin) }
+        } else {
+            $Updated.Text = if ($ageMin -le 0) { 'codex: updated just now' } else { ('codex: updated {0}m ago' -f $ageMin) }
+        }
+    } elseif ($script:epExpired -and $stale) {
         # Expired token is NOT a login problem - the user IS logged in; the file just
         # aged out. Say what's actually happening (nudge in flight) or what actually
         # fixes it (any fresh Claude session rewrites the file).
@@ -573,11 +705,18 @@ function Update-Display {
 # ---- timers ----
 $poll = New-Object Windows.Threading.DispatcherTimer
 $poll.Interval = [TimeSpan]::FromSeconds([double]$cfg.poll_seconds)
-$poll.Add_Tick({ $script:cache = Read-Cache; Update-Display; Save-WindowState })
+# The poll tick owns ALL file reads for the render path; Update-Display and the 1s tick
+# are pure in-memory work so a provider switch can never cost disk I/O once a second.
+$poll.Add_Tick({
+    $script:cache = Read-Cache
+    if ($CODEX_ON) { $script:codexCache = Read-CodexCache; $script:activity = Read-Activity }
+    Update-Display
+    Save-WindowState
+})
 
 $tick = New-Object Windows.Threading.DispatcherTimer
 $tick.Interval = [TimeSpan]::FromSeconds(1)
-$tick.Add_Tick({ if ($script:cache) { Update-Display } })
+$tick.Add_Tick({ if ($script:cache -or $script:codexCache) { Update-Display } })
 
 # ---- live sync: oauth/usage endpoint poll (PRIMARY source for desktop-app users) ----
 # The desktop app never runs the statusLine feed, so this endpoint is the only way to
@@ -843,6 +982,25 @@ $win.Add_Closing({
 # The window is normally taskbar-less (ShowInTaskbar=False); a minimized window with
 # no taskbar entry would be unrecoverable. So: enable the taskbar entry just for the
 # minimized period, and hide it again when the user restores from the taskbar.
+# Provider tabs. Act on BUTTON-DOWN and mark the event Handled, exactly like MinBtn and
+# CloseBtn: the window-level Down handler starts DragMove, which swallows the mouse-up,
+# so an Up-based click would never fire. Consequence: the tab is not a drag handle - the
+# "Moth" wordmark beside it still is.
+function Set-ProviderPick($provider) {
+    $script:pick = $provider
+    $script:pickedAt = [long][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    Save-ProviderPick $script:pick $script:pickedAt
+    Update-Display
+}
+$TabClaude.Add_MouseLeftButtonDown({
+    $_.Handled = $true
+    try { Set-ProviderPick 'claude' } catch { Write-ErrorLog ("tab claude - " + $_.Exception.Message) }
+})
+$TabCodex.Add_MouseLeftButtonDown({
+    $_.Handled = $true
+    try { Set-ProviderPick 'codex' } catch { Write-ErrorLog ("tab codex - " + $_.Exception.Message) }
+})
+
 $MinBtn.Add_MouseLeftButtonDown({
     $_.Handled = $true
     $win.ShowInTaskbar = $true
@@ -911,6 +1069,9 @@ if (-not $script:mutexNew) {
 
 $win.Add_SourceInitialized({
     $script:cache = Read-Cache
+    # Read the Codex side once before first paint so the card OPENS on the right provider
+    # rather than flipping to it up to a poll interval later.
+    if ($CODEX_ON) { $script:codexCache = Read-CodexCache; $script:activity = Read-Activity }
     Update-Display
     $poll.Start(); $tick.Start()
     if ($LIVE_SYNC_ON) { $ep.Start(); Invoke-EndpointPoll }   # immediate first fetch
