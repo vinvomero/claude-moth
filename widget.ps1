@@ -782,6 +782,9 @@ $poll.Add_Tick({
         if ($null -ne $script:activity.codex -and $null -ne $script:cxLastActivity -and
             $script:activity.codex -gt $script:cxLastActivity) { Invoke-CodexPoll }
         $script:cxLastActivity = $script:activity.codex
+        # A poll deferred by the spacing floor is honoured on the first tick that clears
+        # it, so a turn's refresh is delayed rather than lost.
+        if ($script:cxWanted) { Invoke-CodexPoll }
     }
     Update-Display
     Save-WindowState
@@ -797,10 +800,16 @@ $tick.Add_Tick({ if ($script:cache -or $script:codexCache) { Update-Display } })
 # the widget only LAUNCHES capture-codex.ps1 and reads the cache it publishes. The helper
 # owns the exchange, its own 8s deadline, and killing its child.
 $CX_BASE_SECONDS = 180
+# Floor between spawns. The rollout file advances on every streamed Codex turn and the
+# poll tick fires an immediate helper whenever it does, so without this an agentic run
+# spawns an app-server - plus a backend call and a possible auth.json refresh - on every
+# poll tick, roughly every 15 seconds. A deferred poll is remembered, not dropped.
+$CX_MIN_SPACING = 60
 $script:cxBackoff = $CX_BASE_SECONDS
 $script:cxProc = $null
 $script:cxStartedAt = $null
 $script:cxLastActivity = $null
+$script:cxWanted = $false
 
 function Invoke-CodexPoll {
     try {
@@ -820,6 +829,10 @@ function Invoke-CodexPoll {
             return
         }
         if (-not (Test-Path $codexHelper)) { return }
+        $sinceLast = if ($null -eq $script:cxStartedAt) { [int]::MaxValue }
+                     else { [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - $script:cxStartedAt }
+        if ($sinceLast -lt $CX_MIN_SPACING) { $script:cxWanted = $true; return }
+        $script:cxWanted = $false
         # Hidden via ShellExecute (SW_HIDE), the same idiom as the token nudge: the console
         # is created already hidden rather than flashing and then hiding. No -Wait (that
         # would block the dispatcher) and no output redirection.
@@ -1222,7 +1235,17 @@ $win.Add_SourceInitialized({
     # This is also the ONLY place polling starts, so a headless -SelfTest / -Screenshot
     # run (which returns long before this) can never spawn a helper. The first poll is
     # left to the timer rather than fired now: first paint must not wait on a spawn.
-    if ($CODEX_ON) { $cx.Start(); Write-ErrorLog 'codex: polling enabled' }
+    if ($CODEX_ON) {
+        $cx.Start(); Write-ErrorLog 'codex: polling enabled'
+        # First snapshot seconds after first paint, not three minutes later. A one-shot
+        # timer, not an inline call: first paint must not wait on a process spawn. It
+        # cannot fire until this handler returns, so with live sync on it lands after
+        # the synchronous endpoint fetch below.
+        $cxFirst = New-Object Windows.Threading.DispatcherTimer
+        $cxFirst.Interval = [TimeSpan]::FromSeconds(3)
+        $cxFirst.Add_Tick({ $cxFirst.Stop(); Invoke-CodexPoll }.GetNewClosure())
+        $cxFirst.Start()
+    }
     if ($LIVE_SYNC_ON) { $ep.Start(); Invoke-EndpointPoll }   # immediate first fetch
 })
 
