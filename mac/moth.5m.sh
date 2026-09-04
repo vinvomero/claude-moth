@@ -64,9 +64,12 @@ def clean(text):
 
 
 def line(text, **attrs):
+    # Values are cleaned too, not just the text. Every call site passes a literal today,
+    # so this changes no output - but the first one that passes a computed value (a path
+    # in an href, a dynamic tooltip) would otherwise reopen the hole by construction.
     parts = [clean(text)]
     for k, v in attrs.items():
-        parts.append(f"{k}={v}")
+        parts.append(f"{k}={clean(v)}")
     return " | ".join(parts) if attrs else parts[0]
 
 
@@ -275,12 +278,27 @@ def codex_command(path):
 
 def codex_env(path, env):
     child = dict(env)
-    # The resolved directory leads, so a node shim finds its own siblings first; the two
-    # Homebrew prefixes follow because a SwiftBar plugin inherits a login shell's PATH,
-    # which frequently has neither.
-    lead = os.path.dirname(os.path.abspath(path))
-    child["PATH"] = os.pathsep.join([lead, "/opt/homebrew/bin", "/usr/local/bin"])
+    # CLAUDE_CRED is OUR secret and must not leave this process. The bash wrapper above
+    # sets it to the whole Keychain blob - the Claude access token AND the refresh token
+    # that outlives it. `codex` is a different vendor's binary, and it forks whatever MCP
+    # servers the user has configured in ~/.codex/config.toml, which are arbitrary
+    # third-party packages that can read their environment. A hand-run `codex` would never
+    # see this value and has no use for it.
+    child.pop("CLAUDE_CRED", None)
     child.pop("RUST_LOG", None)  # the app-server's tracing layer writes to stderr under it
+    # Belt and braces: drop anything still carrying the credential BY VALUE, so a future
+    # rename of the variable cannot silently reopen this.
+    secret = (env.get("CLAUDE_CRED") or "").strip()
+    if secret:
+        for k in [k for k, v in child.items() if v == env.get("CLAUDE_CRED")]:
+            child.pop(k, None)
+    # The resolved directory LEADS so a node shim finds its own siblings first, then the
+    # two Homebrew prefixes (a SwiftBar plugin inherits a login shell's PATH, which
+    # frequently has neither), and finally the inherited PATH. Replacing it outright would
+    # take /usr/bin and /bin away from a child that shells out to git and sh.
+    lead = os.path.dirname(os.path.abspath(path))
+    inherited = env.get("PATH") or "/usr/bin:/bin"
+    child["PATH"] = os.pathsep.join([lead, "/opt/homebrew/bin", "/usr/local/bin", inherited])
     return child
 
 
@@ -300,6 +318,21 @@ def kill_codex(proc):
         proc.wait(timeout=2)
     except Exception:
         pass
+
+
+def sweep_group(proc):
+    """Kill anything still left in the child's process group.
+
+    `start_new_session` made the child a group leader, so its pid IS the group id and this
+    reaches grandchildren it left behind. Deliberately has no "already exited" early
+    return - the direct child being gone is precisely the case that strands them. An empty
+    group is a harmless ESRCH."""
+    if proc is None:
+        return
+    try:
+        os.killpg(proc.pid, 9)
+    except (AttributeError, OSError, PermissionError):
+        pass  # Windows has no killpg; ESRCH when the group is already empty
 
 
 def _epoch(v):
@@ -365,6 +398,12 @@ def read_codex(path, home, env):
             text=True, encoding="utf-8", errors="replace",
         )
     except PermissionError:
+        # EACCES is not necessarily Gatekeeper. A release tarball, a copy off a share, or
+        # an unzip all drop the execute bit - and telling THAT user to clear a quarantine
+        # attribute sends them to run a command that succeeds and fixes nothing, while the
+        # one `chmod +x` that would work goes unmentioned.
+        if not os.access(path, os.X_OK):
+            return None, {"kind": "not-executable"}
         return None, {"kind": "quarantine"}
     except FileNotFoundError:
         # The path exists (find_codex checked) but exec failed to find something: an npm
@@ -471,19 +510,28 @@ def read_codex(path, home, env):
                     rc = proc.poll()
                 if rc not in (None, 0):
                     return None, {"kind": "exited", "status": rc, "detail": stderr_first_line()}
-                return None, {"kind": "parse-fail", "detail": "closed stdout before answering"}
+                # It answered nothing at all, so "replied with no usable limits" would name
+                # the wrong half of the exchange.
+                return None, {"kind": "no-reply", "detail": "closed its output before answering"}
 
-            seen_lines += 1
             seen_bytes += len(raw)
-            if seen_lines > CODEX_MAX_LINES or seen_bytes > CODEX_MAX_BYTES:
-                return None, {"kind": "parse-fail", "detail": "too much output before answering"}
+            if seen_bytes > CODEX_MAX_BYTES:
+                return None, {"kind": "no-reply", "detail": "sent too much before answering"}
 
             try:
                 msg = json.loads(raw)
             except Exception:
-                continue  # notifications, log noise, a half-line - not a failure
+                msg = None
+            # The line cap counts only what is NOT a well-formed notification. A build that
+            # starts the user's MCP servers emits a burst of them before answering, and
+            # counting those would pin such a user at a permanent failure with no knob to
+            # raise. The deadline and the byte cap above are the real bounds.
+            if not (isinstance(msg, dict) and msg.get("id") is None and msg.get("method")):
+                seen_lines += 1
+                if seen_lines > CODEX_MAX_LINES:
+                    return None, {"kind": "no-reply", "detail": "sent too much before answering"}
             if not isinstance(msg, dict):
-                continue
+                continue  # log noise, a half-line - not a failure
             # Replies can arrive out of order and notifications carry no id at all, so
             # match the id we asked for rather than trusting position.
             if _epoch(msg.get("id")) != req_id:
@@ -498,8 +546,12 @@ def read_codex(path, home, env):
                 return None, {"kind": "parse-fail", "detail": "no usable primary window"}
             return snap, None
     finally:
-        # Close stdin first (the app-server exits on stdio close), then give it a moment,
-        # then kill the group.
+        # Close stdin first (the app-server exits on stdio close), give it a moment, then
+        # sweep the process GROUP either way. A node shim can exit cleanly the instant its
+        # stdin closes while the platform binary it started keeps running on the inherited
+        # pipes - and SwiftBar re-runs this plugin every 5 minutes, so one orphan per run
+        # is 288 abandoned app-servers a day on exactly the npm install shape discovery
+        # went out of its way to support.
         try:
             proc.stdin.close()
         except Exception:
@@ -508,9 +560,10 @@ def read_codex(path, home, env):
             proc.wait(timeout=2)
         except Exception:
             kill_codex(proc)
+        sweep_group(proc)
 
 
-def codex_failure_rows(failure, path, tried, strings=None):
+def codex_failure_rows(failure, path, tried):
     """One human sentence, then a dim row that says exactly where we looked, then the
     issues link. The dim row is what makes a bug report actionable."""
     kind = failure.get("kind")
@@ -537,10 +590,14 @@ def codex_failure_rows(failure, path, tried, strings=None):
         msg = "Codex CLI not found."
     elif kind == "interpreter-missing":
         msg = "Found the Codex CLI, but not the interpreter it needs (install Node, or use the app's own build)."
+    elif kind == "not-executable":
+        msg = "The Codex CLI is not executable: chmod +x " + (path or "<path>")
     elif kind == "quarantine":
         msg = "macOS blocked it. Run it once from a terminal, or clear quarantine: xattr -d com.apple.quarantine " + (path or "<path>")
     elif kind == "timeout":
         msg = "Codex didn't answer in time."
+    elif kind == "no-reply":
+        msg = "Codex started but never answered."
     elif kind == "exited":
         status = failure.get("status")
         msg = f"The Codex CLI exited before answering (status {status})."
@@ -554,7 +611,7 @@ def codex_failure_rows(failure, path, tried, strings=None):
         msg = "Codex replied, but with no usable limits."
 
     rows = [line(msg, color=RED)]
-    if detail and kind in ("exited", "spawn-failed", "rpc", "parse-fail"):
+    if detail and kind in ("exited", "spawn-failed", "rpc", "parse-fail", "no-reply"):
         rows.append(line(detail, color=DIM, size="11"))
     if path:
         rows.append(line(f"Using: {path}", color=DIM, size="11"))

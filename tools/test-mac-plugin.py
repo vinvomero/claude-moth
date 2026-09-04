@@ -123,7 +123,12 @@ def run_plugin(env=None, home=None, which=None, scenario=None, claude=None,
         subprocess.Popen = real_popen
         time.time = real_time
         sys.stdout, sys.stderr = real_out, real_err
-    return out.getvalue(), err.getvalue(), rec
+    rendered = out.getvalue()
+    # Checked on EVERY run, not in one place: a regression that put the Claude token into
+    # an error row would otherwise pass the whole suite.
+    if "sk-ant-oat-FIXTURE" in rendered:
+        raise AssertionError("the Claude token reached rendered output:\n" + rendered)
+    return rendered, err.getvalue(), rec
 
 
 def stub(tmp, *parts):
@@ -210,7 +215,24 @@ with tempfile.TemporaryDirectory() as tmp:
     check("resolved dir leads the child PATH", lead, os.path.dirname(nvm))
     check_that("homebrew prefixes follow",
                "/opt/homebrew/bin" in call["env"]["PATH"] and "/usr/local/bin" in call["env"]["PATH"])
+    check_that("the inherited PATH is kept, not replaced",
+               call["env"]["PATH"].split(os.pathsep)[-1] not in
+               ("", os.path.dirname(nvm), "/opt/homebrew/bin", "/usr/local/bin"),
+               call["env"]["PATH"])
     check_that("RUST_LOG is stripped", "RUST_LOG" not in call["env"])
+
+    # The credential must not reach a different vendor's binary - or anything it forks.
+    # Asserting only what IS in the child env is how this was missed the first time.
+    check_that("CLAUDE_CRED is stripped from the child env",
+               "CLAUDE_CRED" not in call["env"], sorted(call["env"]))
+    leaked = [k for k, v in call["env"].items() if isinstance(v, str) and "sk-ant-oat-FIXTURE" in v]
+    check_that("no child env var carries the token by value", not leaked, str(leaked))
+    # Same guarantee, renamed variable: the by-value sweep has to catch it.
+    _, _, rec2 = run_plugin(env={"MOTH_CODEX": "1", "SOMETHING_ELSE": CRED}, home=tmp,
+                            which=lambda n: None, scenario="calm")
+    leaked2 = [k for k, v in rec2.calls[0]["env"].items()
+               if isinstance(v, str) and "sk-ant-oat-FIXTURE" in v]
+    check_that("a renamed credential var is stripped by value", not leaked2, str(leaked2))
 
 # the real argument list (not the harness's fake) is asserted by reading codex_command
 check("codex_command mirrors the Windows helper", mod["codex_command"]("/x/codex"),
@@ -272,9 +294,19 @@ with tempfile.TemporaryDirectory() as tmp:
                    "5-hour   17% | color=#FFB65C" in out, out)
         check(f"{scen}: no stderr", err, "")
 
+    # 300 notifications then the real reply: the reply must still land. Counting startup
+    # chatter against the cap would permanently fail anyone whose codex build starts their
+    # MCP servers, with no setting they could change.
     out, err, _ = run_plugin(env=ON, which=W, scenario="flood")
-    check_that("over-cap -> capped, not hung", STRINGS["parse-fail"]["mac"] in out, out)
-    check_that("over-cap says what happened", "too much output" in out)
+    check_that("notification burst does not consume the line cap",
+               "5-hour   17% | color=#FFB65C" in out, out)
+    check("no stderr after a notification burst", err, "")
+
+    # ...but 300 non-notification lines are what the cap is for.
+    out, err, _ = run_plugin(env=ON, which=W, scenario="flood-replies")
+    check_that("over-cap -> capped, not hung", STRINGS["no-reply"]["mac"] in out, out)
+    check_that("over-cap says what happened", "sent too much before answering" in out)
+    check_that("over-cap does not blame the reply", STRINGS["parse-fail"]["mac"] not in out)
 
     # --- injection ---
     out, err, _ = run_plugin(env=ON, which=W, scenario="stderr-inject")
@@ -313,6 +345,38 @@ with tempfile.TemporaryDirectory() as tmp:
     check_that("only the FIRST stderr line", "second line" not in out)
     check("no stderr", err, "")
 
+    # --- spawn failures: the branches no scenario could reach, because every scenario
+    # --- used the default codex_command that always spawns successfully.
+    missing = os.path.join(tmp, "no-such-interpreter", "python")
+    out, err, _ = run_plugin(env=ON, which=W, codex_argv=lambda p: [missing, "app-server"])
+    check_that("exec failure on a path that exists -> interpreter row",
+               STRINGS["interpreter-missing"]["mac"] in out, out)
+    check_that("interpreter row does not say 'not found'",
+               STRINGS["binary-missing"]["mac"] not in out)
+    check("no stderr on an exec failure", err, "")
+
+    # A directory raises PermissionError on Windows, which is the same exception macOS
+    # raises for a Gatekeeper kill - so it drives the real branch.
+    out, err, _ = run_plugin(env=ON, which=W, codex_argv=lambda p: [tmp, "app-server"])
+    check_that("permission failure on an executable file -> quarantine row",
+               "com.apple.quarantine" in out, out)
+
+    # ...and the same exception when the file is NOT executable must say chmod instead.
+    real_access = os.access
+    os.access = lambda p, m: False if m == os.X_OK else real_access(p, m)
+    try:
+        out, err, _ = run_plugin(env=ON, which=W, codex_argv=lambda p: [tmp, "app-server"])
+    finally:
+        os.access = real_access
+    check_that("permission failure on a non-executable file -> chmod row",
+               "chmod +x" in out, out)
+    check_that("chmod row does not blame Gatekeeper", "com.apple.quarantine" not in out)
+
+    # line() must clean parameter VALUES too, not just row text.
+    check_that("row parameter values are sanitized",
+               "|" not in mod["line"]("t", href="http://x|bash=rm -rf ~").split(" | ", 1)[1],
+               mod["line"]("t", href="http://x|bash=rm -rf ~"))
+
     started = time.monotonic()
     out, err, _ = run_plugin(env=ON, which=W, scenario="hang")
     elapsed = time.monotonic() - started
@@ -336,10 +400,19 @@ check_that("quarantine hint names the xattr command",
            "xattr -d com.apple.quarantine" in src_text)
 check_that("python3 fallback message is unchanged",
            "Moth: needs python3" in src_text)
-for key in ("binary-missing", "parse-fail", "timeout", "rpc-auth", "rpc-too-old",
-            "rpc-backend", "rpc-overloaded"):
-    check_that(f"string table matches the plugin: {key}",
-               STRINGS[key]["mac"].rstrip(".") in src_text, STRINGS[key]["mac"])
+check_that("dead `strings` parameter is gone", "strings=None" not in src_text)
+check_that("the process group is swept unconditionally", "sweep_group(proc)" in src_text)
+check_that("the credential is stripped by name", 'child.pop("CLAUDE_CRED", None)' in src_text)
+
+# Every non-null 'mac' string in the shared table must appear in the plugin, and the table
+# must not silently gain a class the plugin cannot produce. A null is a deliberate claim
+# that the platform has no such failure, so it is skipped rather than treated as a pass.
+for key, pair in STRINGS.items():
+    if key.startswith("_") or pair.get("mac") is None:
+        continue
+    # A {0} entry is a format template; only its literal prefix can appear in the source.
+    needle = pair["mac"].split("{0}")[0].rstrip(". ")
+    check_that(f"string table matches the plugin: {key}", needle in src_text, pair["mac"])
 
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

@@ -129,8 +129,17 @@ def main():
         sys.stdout.flush()
         reply(CALM)
     elif scenario == "flood":
+        # 300 well-formed NOTIFICATIONS. A build that starts the user's MCP servers emits
+        # a burst like this before answering; it must not be counted against the line cap,
+        # or that user is pinned at a permanent failure with no knob to raise.
         for i in range(300):
             send({"jsonrpc": "2.0", "method": "noise", "params": {"i": i}})
+        reply(CALM)
+    elif scenario == "flood-replies":
+        # 300 lines that are NOT notifications (they carry an id). These are what the cap
+        # is actually for: a server talking without ever answering us.
+        for i in range(300):
+            send({"jsonrpc": "2.0", "id": 900 + i, "result": {"noise": i}})
         reply(CALM)  # never reached by a plugin that caps correctly
     elif scenario == "stderr-inject":
         # A hostile-looking stderr line. It must render as inert text, never as a row
