@@ -27,10 +27,6 @@ Moth has a sibling: [Cricket](https://github.com/vinvomero/claude-cricket) buzze
 phone the moment your coding agent finishes. Moth watches how much you've used; Cricket
 tells you when the work is done.
 
-Moth has a sibling: [Cricket](https://github.com/vinvomero/claude-cricket) buzzes your
-phone the moment your coding agent finishes. Moth watches how much you've used; Cricket
-tells you when the work is done.
-
 ## Setup (one time)
 
 > **Just have the link?** Paste this whole repo URL to Claude Code and say *"install
