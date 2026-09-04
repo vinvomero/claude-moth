@@ -41,8 +41,14 @@ Remove-Item (Join-Path $root 'widget-hidden.flag') -Force -ErrorAction SilentlyC
 # rest of the uninstall.
 $hookTool = Join-Path $root 'tools\install-activity-hooks.ps1'
 if ((Test-Path $hookTool) -and (Test-Path $settings)) {
-    try { & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $hookTool -Uninstall }
-    catch { Write-Host "  [skip] could not remove activity hooks: $_" -ForegroundColor Yellow }
+    # -Quiet so a user who never installed the hooks sees nothing about them; the tool
+    # returns without touching settings.json when there is nothing of ours to remove.
+    # It fails loudly by design (a child process), so report one line rather than letting
+    # a stack trace land in the middle of an uninstall.
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $hookTool -Uninstall -Quiet 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  [skip] activity hooks left in place (settings.json could not be read)" -ForegroundColor Yellow
+    }
 }
 
 # 3. Strip OUR statusLine and SessionStart hook from settings.json (leave foreign ones

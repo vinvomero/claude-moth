@@ -147,6 +147,59 @@ Check 'sound hook survived'    (@(Cfg).hooks.Stop[0].hooks.Count) 2
 Check 'script copy removed'    (Test-Path (Join-Path $fakeLocal 'Moth\touch-activity.ps1')) 'False'
 Check 'still valid JSON'       ([bool](Cfg)) 'True'
 
+Write-Host "`n-- installer: never touch a file it did not change --"
+# A user who never installed the hooks still runs uninstall.ps1, which calls this tool
+# for everyone. Rewriting (and reformatting) their settings.json, and inventing a .bak,
+# would contradict "everything else is left untouched".
+$virgin = Join-Path $tmp 'virgin.json'
+[IO.File]::WriteAllText($virgin, $seed, (New-Object Text.UTF8Encoding($false)))
+$virginBefore = [IO.File]::ReadAllBytes($virgin)
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer -SettingsPath $virgin -TargetDir (Join-Path $fakeLocal 'Moth') -Uninstall -Quiet
+Check 'uninstall-nothing exit 0'  $LASTEXITCODE 0
+Check 'virgin file byte-identical' ([Convert]::ToBase64String([IO.File]::ReadAllBytes($virgin))) ([Convert]::ToBase64String($virginBefore))
+Check 'no backup invented'        (Test-Path "$virgin.moth-activity.bak") 'False'
+
+Write-Host "`n-- installer: refuse a file it cannot parse, before touching anything --"
+$broken = Join-Path $tmp 'broken.json'
+# A trailing comma is the classic hand-edit that makes a config unparseable.
+[IO.File]::WriteAllText($broken, "{`n  `"hooks`": { `"Stop`": [] },`n}", (New-Object Text.UTF8Encoding($false)))
+$brokenBefore = [IO.File]::ReadAllBytes($broken)
+# Pre-install the execution copy so we can prove a refusal does not delete it.
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer -SettingsPath $settings -TargetDir (Join-Path $fakeLocal 'Moth') -Quiet | Out-Null
+Check 'copy present before refusal' (Test-Path (Join-Path $fakeLocal 'Moth\touch-activity.ps1')) 'True'
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer -SettingsPath $broken -TargetDir (Join-Path $fakeLocal 'Moth') -Uninstall -Quiet 2>$null
+Check 'malformed uninstall fails'  ($LASTEXITCODE -ne 0) 'True'
+Check 'malformed file untouched'   ([Convert]::ToBase64String([IO.File]::ReadAllBytes($broken))) ([Convert]::ToBase64String($brokenBefore))
+Check 'copy SURVIVES refusal'      (Test-Path (Join-Path $fakeLocal 'Moth\touch-activity.ps1')) 'True'
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer -SettingsPath $broken -TargetDir (Join-Path $fakeLocal 'Moth') -Quiet 2>$null
+Check 'malformed install fails'    ($LASTEXITCODE -ne 0) 'True'
+Check 'still untouched on install' ([Convert]::ToBase64String([IO.File]::ReadAllBytes($broken))) ([Convert]::ToBase64String($brokenBefore))
+
+Write-Host "`n-- installer: refuse a non-array event before writing --"
+$objEvt = Join-Path $tmp 'objevent.json'
+[IO.File]::WriteAllText($objEvt, '{"hooks":{"Stop":{"hooks":[{"type":"command","command":"x"}]}}}', (New-Object Text.UTF8Encoding($false)))
+$objBefore = [IO.File]::ReadAllBytes($objEvt)
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer -SettingsPath $objEvt -TargetDir (Join-Path $fakeLocal 'Moth') -Quiet 2>$null
+Check 'non-array event refused'    ($LASTEXITCODE -ne 0) 'True'
+Check 'non-array file untouched'   ([Convert]::ToBase64String([IO.File]::ReadAllBytes($objEvt))) ([Convert]::ToBase64String($objBefore))
+
+Write-Host "`n-- installer: an empty file is fresh, not broken --"
+$empty = Join-Path $tmp 'empty.json'
+[IO.File]::WriteAllText($empty, '', (New-Object Text.UTF8Encoding($false)))
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer -SettingsPath $empty -TargetDir (Join-Path $fakeLocal 'Moth') -Quiet
+Check 'empty file install exit 0'  $LASTEXITCODE 0
+$emptyCfg = [IO.File]::ReadAllText($empty) | ConvertFrom-Json
+Check 'hooks written to empty'     (@(@($emptyCfg.hooks.UserPromptSubmit) | Where-Object { @($_.hooks | Where-Object { $_.command -like '*touch-activity.ps1*' }).Count }).Count) 1
+
+Write-Host "`n-- installer: emptied events collapse, not left as [] --"
+$solo = Join-Path $tmp 'solo.json'
+[IO.File]::WriteAllText($solo, '{"statusLine":{"type":"command","command":"x"}}', (New-Object Text.UTF8Encoding($false)))
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer -SettingsPath $solo -TargetDir (Join-Path $fakeLocal 'Moth') -Quiet
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer -SettingsPath $solo -TargetDir (Join-Path $fakeLocal 'Moth') -Uninstall -Quiet
+$soloCfg = [IO.File]::ReadAllText($solo) | ConvertFrom-Json
+Check 'emptied event removed'      ($soloCfg.hooks.PSObject.Properties.Name -contains 'UserPromptSubmit') 'False'
+Check 'unrelated keys survive'     $soloCfg.statusLine.command 'x'
+
 Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host ("`n{0} passed, {1} failed" -f $script:pass, $script:fail)
 if ($script:fail) { exit 1 }

@@ -55,8 +55,8 @@ function Test-IsOurs($group) {
 # Shape validation, not just "parses as JSON". PowerShell 5.1 unrolls a one-element
 # array to a scalar in several code paths, and "Stop": { ... } instead of "Stop": [ ... ]
 # is perfectly valid JSON that Claude Code will not accept.
-function Test-HooksShape($path) {
-    $cfg = [System.IO.File]::ReadAllText($path) | ConvertFrom-Json
+function Test-HooksShape($cfg) {
+    if ($null -eq $cfg) { return $true }
     if (-not ($cfg.PSObject.Properties.Name -contains 'hooks')) { return $true }
     foreach ($evt in $cfg.hooks.PSObject.Properties) {
         if ($evt.Value -isnot [System.Object[]]) { return $false }
@@ -73,6 +73,33 @@ function Test-HooksShape($path) {
 if (-not (Test-Path -LiteralPath $SettingsPath)) {
     throw "settings.json not found at $SettingsPath - is Claude Code installed for this user?"
 }
+# The command string is executed by a shell, so the same characters install.ps1 refuses
+# in the repo path would break the hook command here.
+if ($TargetDir -match '[`$%]') {
+    throw "the install folder's path contains a character (`$, `` or %) that breaks the hook command: $TargetDir"
+}
+
+# --- 0. Validate the INPUT before touching anything ------------------------------
+# Read, parse and shape-check first. Doing this after the execution copy is removed
+# would leave the hooks pointing at a script that no longer exists on any refusal - a
+# missing command on every prompt. An unparseable settings.json is left byte-identical;
+# an empty one is treated as fresh, the same as install.ps1 treats it.
+$rawSettings = [System.IO.File]::ReadAllText($SettingsPath)
+$cfg = $null
+if ($rawSettings.Trim().Length -gt 0) {
+    try { $cfg = $rawSettings | ConvertFrom-Json }
+    catch { throw "settings.json at $SettingsPath is not valid JSON - nothing was changed. Fix or restore it, then re-run. $_" }
+}
+if (-not (Test-HooksShape $cfg)) {
+    throw "settings.json at $SettingsPath has a malformed hooks section (an event is not an array) - nothing was changed."
+}
+# Claude Code hot-reloads this file and rewrites it itself; a concurrent write would be
+# clobbered. Warn rather than block - the window is milliseconds.
+try {
+    if (@(Get-Process -Name 'claude' -ErrorAction SilentlyContinue).Count) {
+        Say "  [!!] a 'claude' process is running - close your Claude Code sessions before installing" 'Yellow'
+    }
+} catch { }
 
 # --- 1. Install or remove the execution copy -------------------------------------
 if ($Uninstall) {
@@ -89,15 +116,23 @@ if ($Uninstall) {
     Say "  [ok] installed $target" 'Green'
 }
 
-# --- 2. Back up once, then read LATE ---------------------------------------------
-# Both Claude Code and this script write settings.json; read immediately before the
-# merge so a concurrent change is not clobbered by a stale in-memory copy.
-if (-not (Test-Path -LiteralPath $backup)) {
+# --- 2. Back up (install only), then re-read LATE ---------------------------------
+# Uninstall takes no backup: it would create a .bak for a user who never installed
+# anything, which is a file appearing out of nowhere on a cleanup path.
+if (-not $Uninstall -and -not (Test-Path -LiteralPath $backup)) {
     Copy-Item -LiteralPath $SettingsPath -Destination $backup
     Say "  [ok] backed up settings.json -> $backup" 'Green'
 }
 
-$cfg = [System.IO.File]::ReadAllText($SettingsPath) | ConvertFrom-Json
+# Both Claude Code and this script write settings.json; re-read immediately before the
+# merge so a change made since the step-0 validation is not clobbered.
+$cfg = $null
+$rawLate = [System.IO.File]::ReadAllText($SettingsPath)
+if ($rawLate.Trim().Length -gt 0) {
+    try { $cfg = $rawLate | ConvertFrom-Json }
+    catch { throw "settings.json became unparseable while this script was running - nothing was changed. $_" }
+}
+if ($null -eq $cfg) { $cfg = [pscustomobject]@{} }
 if (-not ($cfg.PSObject.Properties.Name -contains 'hooks') -or -not $cfg.hooks) {
     $cfg | Add-Member -NotePropertyName hooks -NotePropertyValue ([pscustomobject]@{}) -Force
 }
@@ -123,9 +158,16 @@ foreach ($evt in $EVENTS) {
     $removed += ($existing.Count - $kept.Count)
 
     if ($Uninstall) {
-        # [object[]] cast: without it a single surviving group unrolls to a scalar and
-        # the event serializes as an object instead of an array.
-        $cfg.hooks.$evt = [object[]]$kept
+        if (@($kept).Count -eq 0) {
+            # Collapse an event we emptied, matching uninstall.ps1's own convention -
+            # leaving "UserPromptSubmit": [] behind is litter from a tool that claims to
+            # reverse itself cleanly.
+            $cfg.hooks.PSObject.Properties.Remove($evt)
+        } else {
+            # [object[]] cast: without it a single surviving group unrolls to a scalar and
+            # the event serializes as an object instead of an array.
+            $cfg.hooks.$evt = [object[]]$kept
+        }
     } else {
         $entry = [pscustomobject]@{
             hooks = [object[]]@([pscustomobject]@{
@@ -137,16 +179,25 @@ foreach ($evt in $EVENTS) {
     }
 }
 
-# --- 4. Write, then validate what actually landed --------------------------------
+# --- 4. Write only if something changed, then validate what landed ---------------
+# An uninstall that removed nothing must not rewrite (and reformat) the file of a user
+# who never installed the hooks. uninstall.ps1 calls this for everyone.
+if ($added -eq 0 -and $removed -eq 0) {
+    if ($Uninstall) { Say "  [ok] no activity hooks were installed; settings.json untouched" 'Green' }
+    if ($foreign) { Say "  [!!] $foreign entr(ies) point at touch-activity.ps1 with a different -Provider - inspect them" 'Yellow' }
+    return
+}
+
 Write-Utf8NoBom $SettingsPath ($cfg | ConvertTo-Json -Depth 100)
 
 $bytes = [System.IO.File]::ReadAllBytes($SettingsPath)
 if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
     throw "settings.json was written with a BOM - restore from $backup"
 }
-try { [System.IO.File]::ReadAllText($SettingsPath) | ConvertFrom-Json | Out-Null }
+$written = $null
+try { $written = [System.IO.File]::ReadAllText($SettingsPath) | ConvertFrom-Json }
 catch { throw "settings.json became invalid JSON - restore from $backup. $_" }
-if (-not (Test-HooksShape $SettingsPath)) {
+if (-not (Test-HooksShape $written)) {
     throw "settings.json hooks are malformed (an event is not an array) - restore from $backup"
 }
 
