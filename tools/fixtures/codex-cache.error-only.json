@@ -1,0 +1,8 @@
+{
+    "last_error": {
+        "class": "binary-missing",
+        "code": null,
+        "message": "codex.exe not found (override, CODEX_CLI_PATH, PATH, and bin glob all failed)",
+        "at": 1788460000
+    }
+}

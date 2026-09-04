@@ -1,0 +1,8 @@
+{
+    "last_error": {
+        "class": "rpc-error",
+        "code": -32600,
+        "message": "chatgpt authentication required to read rate limits",
+        "at": 1788460000
+    }
+}

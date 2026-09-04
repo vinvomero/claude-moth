@@ -58,7 +58,12 @@ if (Test-Path $stateFile) {
         # until the OTHER provider shows activity newer than the pick.
         if ($null -ne $st.provider)          { $cfg.provider          = $st.provider }
         if ($null -ne $st.provider_picked_at) { $cfg.provider_picked_at = $st.provider_picked_at }
-    } catch { }
+    } catch {
+        # A hand-edit with an unescaped backslash (e.g. "codex_exe": "C:\Users\...") makes
+        # the whole file unparseable, and every setting in it - position, live_sync, codex -
+        # silently reverts to defaults. Say so once instead of leaving the user to guess.
+        Write-ErrorLog ("window-state.json could not be parsed; using defaults - " + $_.Exception.Message)
+    }
 }
 # Opt-in live sync via the oauth/usage endpoint (undocumented; see README). This is
 # the PRIMARY data source for desktop-app users, who get no statusLine feed. Accept
@@ -305,11 +310,14 @@ function Read-Cache {
 function Read-CodexCache {
     if (-not (Test-Path $codexCacheFile)) { return $null }
     try { $c = Get-Content $codexCacheFile -Raw | ConvertFrom-Json } catch { return $null }
-    if (-not $c.five_hour) { return $null }
-    if (-not (Test-Numeric $c.five_hour.used_percentage)) { return $null }
-    if (-not (Test-Numeric $c.captured_at)) { return $null }
+    # An ERROR-ONLY cache (last_error, no buckets) is a valid shape, not a broken one: the
+    # helper writes it whenever a poll fails, and it is the whole mechanism by which the
+    # card explains itself. Rejecting it here is what made "turn the flag on and nothing
+    # happens" the experience for anyone whose Codex was missing or signed out.
+    $hasBuckets = ($c.five_hour -and (Test-Numeric $c.five_hour.used_percentage) -and (Test-Numeric $c.captured_at))
+    if (-not $hasBuckets -and -not $c.last_error) { return $null }
     # Weekly is optional; drop just that bucket when it is malformed.
-    if ($c.seven_day -and -not (Test-Numeric $c.seven_day.used_percentage)) {
+    if ($hasBuckets -and $c.seven_day -and -not (Test-Numeric $c.seven_day.used_percentage)) {
         $c.PSObject.Properties.Remove('seven_day')
     }
     return $c
@@ -358,12 +366,22 @@ function ConvertTo-ProviderView($provider, $c) {
     $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     $staleSecs = [int]$cfg.stale_minutes * 60
 
-    $capturedAt = [long]$c.captured_at
-    $baseStale = (($now - $capturedAt) -ge $staleSecs)
+    # capturedAt stays $null when the cache has none (the error-only shape): casting an
+    # absent stamp to [long] yields 0, which renders as "last synced 496000h ago".
+    $capturedAt = $null
+    $baseStale = $false
+    if (Test-Numeric $c.captured_at) {
+        $capturedAt = [long]$c.captured_at
+        $baseStale = (($now - $capturedAt) -ge $staleSecs)
+    }
+    $p5 = $null
+    if ($c.five_hour -and (Test-Numeric $c.five_hour.used_percentage)) {
+        $p5 = [math]::Max(0, [math]::Min(100, [double]$c.five_hour.used_percentage))
+    }
 
     $v = [pscustomobject]@{
         provider    = $provider
-        p5          = [math]::Max(0, [math]::Min(100, [double]$c.five_hour.used_percentage))
+        p5          = $p5
         r5          = $null
         p7          = $null
         r7          = $null
@@ -375,6 +393,10 @@ function ConvertTo-ProviderView($provider, $c) {
         capturedAt  = $capturedAt
         lastError   = $null
     }
+    # Attach the reason BEFORE the early return - an error-only view is precisely the one
+    # that has nothing but a reason to show.
+    if ($c.last_error) { $v.lastError = $c.last_error }
+    if ($null -eq $p5) { return $v }   # error-only view: no bars, no countdowns to build
     if (Test-Numeric $c.five_hour.resets_at) { $v.r5 = [long]$c.five_hour.resets_at }
     if (Test-Numeric $c.five_hour.window_mins) {
         $w = [double]$c.five_hour.window_mins * 60.0
@@ -459,9 +481,17 @@ $STALE_BAR = '#8A7B5E'
 function Show-ProviderView($v) {
     $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
 
-    $Pct5.Text = ('{0}%' -f [math]::Round($v.p5))
-    $script:p5 = $v.p5   # Update-Layout turns these into fill widths (fluid)
-    $col5 = if ($v.stale5) { $STALE_BAR } else { Get-BarColor $v.p5 }
+    # A provider can have no reading at all (a failed poll with no prior snapshot). Show
+    # the bar as unknown rather than as a confident 0%.
+    if ($null -eq $v.p5) {
+        $Pct5.Text = '--%'
+        $script:p5 = 0
+        $col5 = $STALE_BAR
+    } else {
+        $Pct5.Text = ('{0}%' -f [math]::Round($v.p5))
+        $script:p5 = $v.p5   # Update-Layout turns these into fill widths (fluid)
+        $col5 = if ($v.stale5) { $STALE_BAR } else { Get-BarColor $v.p5 }
+    }
     $Fill5.Background = [Windows.Media.BrushConverter]::new().ConvertFromString($col5)
 
     # A provider can report no weekly bucket at all (some Codex plans). Show the bar as
@@ -479,7 +509,7 @@ function Show-ProviderView($v) {
 
     # Bar glow: match the bar when fresh, off (transparent) when stale.
     try {
-        if ($Fill5.Effect) { $Fill5.Effect.Opacity = if ($v.stale5) { 0.0 } else { 0.55 }; $Fill5.Effect.Color = [Windows.Media.ColorConverter]::ConvertFromString($col5) }
+        if ($Fill5.Effect) { $Fill5.Effect.Opacity = if ($v.stale5 -or $null -eq $v.p5) { 0.0 } else { 0.55 }; $Fill5.Effect.Color = [Windows.Media.ColorConverter]::ConvertFromString($col5) }
         if ($Fill7.Effect) { $Fill7.Effect.Opacity = if ($v.stale7 -or $null -eq $v.p7) { 0.0 } else { 0.55 }; $Fill7.Effect.Color = [Windows.Media.ColorConverter]::ConvertFromString($col7) }
     } catch { }
 
@@ -592,6 +622,20 @@ function Update-Display {
     if ($cv) { $views['claude'] = $cv }
     if ($CODEX_ON -or $script:forcedProvider) {
         $xv = ConvertTo-ProviderView 'codex' $script:codexCache
+        # No cache file at all yet. Say so, rather than showing a Claude-only card that
+        # looks exactly like the flag having done nothing: "checking" until the first
+        # poll has had its chance, then the launch failure it must be if nothing landed
+        # (blocked execution policy, an uncreatable data dir, a helper that died early).
+        if (-not $xv -and $CODEX_ON) {
+            $waited = if ($null -eq $script:cxStartedAt) { 0 } else { [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - $script:cxStartedAt }
+            $pendingClass = if ($script:cxStartedAt -and $waited -gt 30) { 'spawn-failed' } else { 'pending' }
+            $xv = [pscustomobject]@{
+                provider = 'codex'; p5 = $null; r5 = $null; p7 = $null; r7 = $null
+                stale5 = $false; stale7 = $false; window5Secs = 18000.0
+                fable = $null; fableStale = $false; capturedAt = $null
+                lastError = $(if ($pendingClass -eq 'pending') { $null } else { [pscustomobject]@{ class = 'spawn-failed'; code = $null; message = '' } })
+            }
+        }
         if ($xv) { $views['codex'] = $xv }
     }
     $script:views = $views
@@ -619,7 +663,10 @@ function Update-Display {
         return
     }
     $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
-    $ageMin = [math]::Floor(($now - $v.capturedAt) / 60)
+    # No timestamp means no snapshot has ever landed, so there is no age to report - the
+    # status text says what is happening instead of inventing an elapsed time.
+    $ageMin = $null
+    if ($null -ne $v.capturedAt) { $ageMin = [math]::Floor(($now - $v.capturedAt) / 60) }
     $stale  = $v.stale5
 
     Show-ProviderView $v
@@ -678,10 +725,24 @@ function Update-Display {
     # Status text belongs to the VISIBLE provider. A Claude token hint printed under
     # Codex bars would tell the user to fix something unrelated to what they can see.
     if ($active -eq 'codex') {
-        $cls = if ($v.lastError) { [string]$v.lastError.class } else { '' }
+        $cls  = if ($v.lastError) { [string]$v.lastError.class } else { '' }
+        $code = if ($v.lastError -and (Test-Numeric $v.lastError.code)) { [int]$v.lastError.code } else { $null }
+        $msg  = if ($v.lastError) { [string]$v.lastError.message } else { '' }
         if ($cls -eq 'binary-missing')  { $Updated.Text = 'Codex app-server not found' }
-        elseif ($cls -eq 'rpc-error')   { $Updated.Text = 'sign in to Codex to sync' }
+        elseif ($cls -eq 'spawn-failed'){ $Updated.Text = "couldn't start Codex" }
+        elseif ($cls -eq 'parse-fail')  { $Updated.Text = 'Codex reply had no usable limits' }
+        elseif ($cls -eq 'rpc-error') {
+            # -32600 is JSON-RPC's generic "invalid request" - the server returns it for
+            # rejected params too, so only the message makes it a sign-in problem.
+            if     ($code -eq -32600 -and $msg -match '(?i)auth') { $Updated.Text = 'sign in to Codex to sync' }
+            elseif ($code -eq -32601) { $Updated.Text = 'Codex too old for rateLimits/read' }
+            elseif ($code -eq -32603) { $Updated.Text = 'Codex sync failed' }
+            elseif ($code -eq -32001) { $Updated.Text = 'Codex overloaded, retrying' }
+            elseif ($null -ne $code)  { $Updated.Text = ('Codex error {0}' -f $code) }
+            else                      { $Updated.Text = 'Codex sync failed' }
+        }
         elseif ($cls -eq 'timeout')     { $Updated.Text = 'codex: poll timed out' }
+        elseif ($null -eq $ageMin)      { $Updated.Text = 'Codex: checking...' }
         elseif ($stale) {
             $Updated.Text = if ($ageMin -ge 60) { ('codex: last synced {0}h ago' -f [math]::Floor($ageMin/60)) } else { ('codex: last synced {0}m ago' -f $ageMin) }
         } else {

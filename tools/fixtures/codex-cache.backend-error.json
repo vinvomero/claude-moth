@@ -1,0 +1,14 @@
+{
+    "five_hour": {
+        "used_percentage": 40,
+        "resets_at": null,
+        "window_mins": 300
+    },
+    "captured_at": 1788400000,
+    "last_error": {
+        "class": "rpc-error",
+        "code": -32603,
+        "message": "failed to fetch codex rate limits: upstream unavailable",
+        "at": 1788460000
+    }
+}

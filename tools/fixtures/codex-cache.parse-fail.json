@@ -1,0 +1,8 @@
+{
+    "last_error": {
+        "class": "parse-fail",
+        "code": null,
+        "message": "reply carried no usable primary rate-limit window",
+        "at": 1788460000
+    }
+}

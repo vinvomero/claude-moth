@@ -1,0 +1,8 @@
+{
+    "last_error": {
+        "class": "spawn-failed",
+        "code": null,
+        "message": "could not start C:\\path\\codex.cmd: The system cannot find the file specified",
+        "at": 1788460000
+    }
+}

@@ -233,7 +233,7 @@ function Publish-Cache($path, $obj) {
 # it (greying on its own captured_at) and reads last_error for honest status text.
 # Logs ONE line per distinct failure - this helper is a fresh process every poll, so
 # without the comparison a missing binary would write hundreds of lines a day.
-function Set-LastError($class, $message) {
+function Set-LastError($class, $message, $code) {
     $prev = Read-PreviousCache $cacheFile
     $prevClass = $null
     if ($prev -and $prev.last_error) { $prevClass = [string]$prev.last_error.class }
@@ -250,8 +250,13 @@ function Set-LastError($class, $message) {
         $trimmed = [string]$message
         if ($trimmed.Length -gt 200) { $trimmed = $trimmed.Substring(0, 200) }
     }
+    # The CODE is recorded, not just the class: -32600 means "invalid request", which the
+    # server also returns for rejected params, so "sign in" is only the right hint when
+    # the message says so. -32603 is a backend failure and -32601 an outdated binary -
+    # telling either of those users to sign in would send them somewhere useless.
     $obj.last_error = [ordered]@{
         class = $class
+        code = $(if ($null -ne $code) { [int]$code } else { $null })
         message = $trimmed
         at = [long][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     }
@@ -314,9 +319,16 @@ try {
     $deadline = [DateTime]::UtcNow.AddMilliseconds($DeadlineMs)
 
     try {
-        $proc = [System.Diagnostics.Process]::Start($psi)
+        # A throwing Start used to fall straight through to the finally blocks and end the
+        # script with exit 0 and NOTHING written - the launch "succeeded" from the widget's
+        # side and the card silently showed no Codex at all. Record it instead.
+        try { $proc = [System.Diagnostics.Process]::Start($psi) }
+        catch {
+            Set-LastError 'spawn-failed' ("could not start {0}: {1}" -f $exe, $_.Exception.Message)
+            exit 5
+        }
         if ($null -eq $proc) {
-            Set-LastError 'binary-missing' ("could not start {0}" -f $exe)
+            Set-LastError 'spawn-failed' ("could not start {0}" -f $exe)
             exit 5
         }
 
@@ -385,7 +397,7 @@ try {
 
         if ($rpcError) {
             # error.data may echo upstream response text - log the message only.
-            Set-LastError 'rpc-error' ("{0} {1}" -f $rpcError.code, $rpcError.message)
+            Set-LastError 'rpc-error' ([string]$rpcError.message) $rpcError.code
             exit 3
         }
 
