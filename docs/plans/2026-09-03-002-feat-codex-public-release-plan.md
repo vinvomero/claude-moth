@@ -1,7 +1,7 @@
 ---
 title: "feat: Codex provider for anyone, on Windows and Mac"
 type: feat
-status: active
+status: completed
 date: 2026-09-03
 deepened: 2026-09-03
 ---
