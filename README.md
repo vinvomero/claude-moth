@@ -57,6 +57,10 @@ and you can bring it back any time by typing **`/moth`** in Claude Code.
 The bars fill in the moment your **next** Claude Code session makes its first request.
 Until then it shows "waiting for Claude usage data…".
 
+If you unplug a monitor Moth was sitting on, it moves itself back onto a screen you
+still have the next time it starts, and notes the move in `widget-error.log`. Restoring a
+saved position exactly is the right behavior until that position stops existing.
+
 **Resize it** by dragging **any edge or corner**, like a normal window — width and height
 are independent, the text stays crisp, and Moth remembers the size. Drag it wide and short
 to tuck under your taskbar, or tall and narrow along a screen edge.
@@ -190,7 +194,7 @@ starts (or right away if you type **`/moth`**).
 | `config.json` | refresh rate, "stale" threshold, default position/size, `live_sync`, `codex` — edit if you like (size is also just drag-resizable) |
 | `usage-cache.json` | the latest saved numbers (created automatically) |
 | `window-state.json` | where you dragged the widget, plus your personal `live_sync` / `codex` / `codex_exe` overrides (created automatically, gitignored) |
-| `widget-error.log` | errors the widget couldn't show you — a failed launch, an unparseable `window-state.json`, a Codex failure that changed class |
+| `widget-error.log` | errors the widget couldn't show you — a failed launch, an unparseable `window-state.json`, a window rescued from a monitor that no longer exists, a Codex failure that changed class |
 
 Two runtime files live **outside** the repo, under `%LOCALAPPDATA%\Moth\`, because this
 folder is often in OneDrive — which rewrites file times and would forge the activity

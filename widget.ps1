@@ -121,6 +121,59 @@ $MIN_W = 230.0; $MIN_H = 190.0; $MAX_W = 1440.0; $MAX_H = 1240.0
 $cfg.win_w = [math]::Min($MAX_W, [math]::Max($MIN_W, $cfg.win_w))
 $cfg.win_h = [math]::Min($MAX_H, [math]::Max($MIN_H, $cfg.win_h))
 
+# Rescue a window stranded off-screen. The saved position is restored faithfully, which
+# is right up until the monitor it was saved on goes away - undock a laptop, unplug a
+# second display, change the arrangement - and then the card is dutifully restored to
+# coordinates no screen covers any more. It is running, painting and polling; you just
+# cannot see it, and /moth "works" every time without helping, because restoring the
+# saved position IS the bug.
+#
+# Require a real overlap with the virtual desktop, not merely a corner: a titlebar-less
+# always-on-top card offers nothing to grab, so a visible sliver is barely better than
+# none. Pure and fully injectable (the desktop rectangle is a parameter, not a call into
+# System.Windows.Forms) so the fixture test can place monitors wherever it likes -
+# the same discipline Limit-ResetsAt uses for its clock.
+function Resolve-OnScreenPosition(
+        [double]$left, [double]$top, [double]$w, [double]$h,
+        [double]$vsX, [double]$vsY, [double]$vsW, [double]$vsH) {
+    # TYPED, deliberately. Untyped, PowerShell will happily bind a string here and
+    # then `$left + $w` CONCATENATES instead of adding - "-300" + 393 becomes
+    # "-300393", which compares as text and reports a perfectly visible window as
+    # off-screen. The fixture test caught exactly that.
+    $VISIBLE = 80.0   # px of the card that must land on a real screen
+    if ($vsW -le 0 -or $vsH -le 0) {
+        return [pscustomobject]@{ left = $left; top = $top; moved = $false }
+    }
+    $offLeft   = ($left + $w) -lt ($vsX + $VISIBLE)
+    $offRight  = $left -gt ($vsX + $vsW - $VISIBLE)
+    $offTop    = ($top + $h) -lt ($vsY + $VISIBLE)
+    $offBottom = $top -gt ($vsY + $vsH - $VISIBLE)
+    if (-not ($offLeft -or $offRight -or $offTop -or $offBottom)) {
+        return [pscustomobject]@{ left = $left; top = $top; moved = $false }
+    }
+    # Clamp so the WHOLE card lands on the desktop where it fits. Max-then-min order
+    # matters: on a desktop smaller than the card the min would push it negative, and the
+    # max pulls it back to the origin rather than off the opposite edge.
+    $nl = [math]::Min([math]::Max($vsX, $left), $vsX + $vsW - $w)
+    $nt = [math]::Min([math]::Max($vsY, $top),  $vsY + $vsH - $h)
+    $nl = [math]::Max($vsX, $nl)
+    $nt = [math]::Max($vsY, $nt)
+    return [pscustomobject]@{ left = $nl; top = $nt; moved = $true }
+}
+try {
+    Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+    $vs = [System.Windows.Forms.SystemInformation]::VirtualScreen
+    $fix = Resolve-OnScreenPosition $cfg.window_left $cfg.window_top $cfg.win_w $cfg.win_h `
+               $vs.X $vs.Y $vs.Width $vs.Height
+    if ($fix.moved) {
+        Write-ErrorLog ("window was off-screen at {0},{1} (desktop {2}x{3} at {4},{5}); moved to {6},{7}" -f `
+            [int]$cfg.window_left, [int]$cfg.window_top, [int]$vs.Width, [int]$vs.Height,
+            [int]$vs.X, [int]$vs.Y, [int]$fix.left, [int]$fix.top)
+        $cfg.window_left = $fix.left
+        $cfg.window_top  = $fix.top
+    }
+} catch { }
+
 $xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
