@@ -1,0 +1,28 @@
+{
+  "_comment": "Canned api/oauth/usage reply for the Mac plugin harness. Every resets_at is BEFORE the harness's pinned clock (1788460000) on purpose: remaining() then returns 'resetting...' for all three, so the golden carries no local wall-clock time and is identical in every timezone.",
+  "five_hour": { "utilization": 42.4, "resets_at": 1788400000 },
+  "seven_day": { "utilization": 18.6, "resets_at": 1788300000 },
+  "limits": [
+    {
+      "group": "weekly",
+      "is_active": true,
+      "percent": 55.2,
+      "resets_at": 1788300000,
+      "scope": { "model": { "display_name": "Fable" } }
+    },
+    {
+      "group": "weekly",
+      "is_active": false,
+      "percent": 91.0,
+      "resets_at": 1788300000,
+      "scope": { "model": { "display_name": "Sonnet" } }
+    },
+    {
+      "group": "five_hour",
+      "is_active": true,
+      "percent": 99.0,
+      "resets_at": 1788300000,
+      "scope": { "model": { "display_name": "NotWeekly" } }
+    }
+  ]
+}

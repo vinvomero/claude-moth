@@ -34,6 +34,23 @@ if (Test-Path $mothCmd) { Remove-Item $mothCmd -Force; Write-Host "  [ok] /moth 
 # 2c. Remove any user-hide marker so a fresh reinstall starts clean.
 Remove-Item (Join-Path $root 'widget-hidden.flag') -Force -ErrorAction SilentlyContinue
 
+# 2d. Remove the provider-activity hooks and their out-of-repo script copy, if they were
+# installed. These fire on EVERY prompt, so leaving them behind after the folder moves
+# would run a missing script on every turn. Runs before step 3 so that re-reads the
+# post-removal file. The hook installer fails loudly by design; never let that abort the
+# rest of the uninstall.
+$hookTool = Join-Path $root 'tools\install-activity-hooks.ps1'
+if ((Test-Path $hookTool) -and (Test-Path $settings)) {
+    # -Quiet so a user who never installed the hooks sees nothing about them; the tool
+    # returns without touching settings.json when there is nothing of ours to remove.
+    # It fails loudly by design (a child process), so report one line rather than letting
+    # a stack trace land in the middle of an uninstall.
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $hookTool -Uninstall -Quiet 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  [skip] activity hooks left in place (settings.json could not be read)" -ForegroundColor Yellow
+    }
+}
+
 # 3. Strip OUR statusLine and SessionStart hook from settings.json (leave foreign ones
 #    alone), then write once.
 if (Test-Path $settings) {

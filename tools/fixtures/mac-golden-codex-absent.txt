@@ -1,0 +1,12 @@
+42% | color=#FFB65C
+---
+Moth - Claude usage | color=#6E6552
+---
+5-hour   42% | color=#FFB65C
+resetting… | color=#6E6552 | size=11
+Weekly   19% | color=#FFB65C
+resetting… | color=#6E6552 | size=11
+Fable (weekly)   55% | color=#FFB65C
+resetting… | color=#6E6552 | size=11
+---
+Refresh | refresh=true

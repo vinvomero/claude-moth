@@ -1,0 +1,13 @@
+{
+    "five_hour":  {
+                      "used_percentage":  40,
+                      "resets_at":  1788453177,
+                      "window_mins":  300
+                  },
+    "captured_at":  1788445077,
+    "last_error":  {
+                       "class":  "rpc-error",
+                       "message":  "chatgpt authentication required",
+                       "at":  1788452277
+                   }
+}

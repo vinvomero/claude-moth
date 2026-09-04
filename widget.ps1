@@ -1,4 +1,4 @@
-param([string]$SelfTest, [string]$Screenshot)
+param([string]$SelfTest, [string]$Screenshot, [string]$CodexFixture, [string]$Provider, [string]$StatePath)
 # widget.ps1
 # Frameless, always-on-top desktop widget that shows real Claude Code usage
 # (5-hour + weekly) read from usage-cache.json. Native WPF via Windows PowerShell 5.1.
@@ -7,6 +7,15 @@ param([string]$SelfTest, [string]$Screenshot)
 #   -SelfTest <cache.json> | empty   render against a sample cache (or the no-cache
 #                                    state) and print a one-line state dump
 #   -Screenshot <out.png>            render the card to a PNG (uses the live cache)
+#   -CodexFixture <cache.json>       supply a Codex snapshot without polling Codex
+#                                    ('empty' = no Codex snapshot, and do NOT fall back
+#                                    to the live cache)
+#   -Provider claude|codex           force which provider the dev render paints
+#   -StatePath <state.json>          read/write window state here instead of the real
+#                                    window-state.json, so a demo render can set its own
+#                                    flags without touching the author's settings
+# Dev flags never start the timers (those live in SourceInitialized), so a headless
+# run can never spawn the Codex helper.
 
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 Add-Type -AssemblyName System.Windows.Forms   # Cursor::Position (absolute screen px) for drag-resize
@@ -14,7 +23,10 @@ Add-Type -AssemblyName System.Windows.Forms   # Cursor::Position (absolute scree
 $root      = $PSScriptRoot
 $cacheFile = Join-Path $root 'usage-cache.json'
 $cfgFile   = Join-Path $root 'config.json'
-$stateFile = Join-Path $root 'window-state.json'   # per-user runtime state (gitignored)
+# Per-user runtime state (gitignored). -StatePath redirects every read AND write of it,
+# so a demo render can hand itself a throwaway state file instead of borrowing - and
+# rewriting - the author's real one.
+$stateFile = if ($StatePath) { $StatePath } else { Join-Path $root 'window-state.json' }
 $logFile   = Join-Path $root 'widget-error.log'
 $hiddenFlag = Join-Path $root 'widget-hidden.flag' # written when the user clicks x, so
                                                    # mid-session relaunch respects the close;
@@ -25,6 +37,24 @@ function Write-Utf8NoBom($path, $text) {
 }
 function Write-ErrorLog($msg) {
     try { Add-Content -Path $logFile -Value ("[{0}] {1}" -f ([DateTime]::UtcNow.ToString('u')), $msg) } catch { }
+}
+# window-state.json is CROSS-PROCESS state: capture-codex.ps1 reads codex_exe out of it
+# every poll. WriteAllText truncates before it writes, so a plain write leaves a window in
+# which the helper reads zero bytes, silently falls back to discovery, and reports
+# "Codex app-server not found" for a Codex that is installed and working - on precisely
+# the unusual-install machines codex_exe exists for. Same atomic-swap discipline
+# capture-codex.ps1 already uses for its own cache.
+function Write-StateAtomic($path, $text) {
+    $tmp = "$path.$PID.tmp"
+    try {
+        Write-Utf8NoBom $tmp $text
+        if (Test-Path -LiteralPath $path) { [System.IO.File]::Replace($tmp, $path, [NullString]::Value) }
+        else { Move-Item -LiteralPath $tmp -Destination $path -Force }
+    } catch {
+        try { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue } catch { }
+        # Last resort: a non-atomic write still beats losing the user's window position.
+        try { Write-Utf8NoBom $path $text } catch { }
+    }
 }
 
 # ---- config (shipped defaults; user-editable) + window state (runtime; gitignored) ----
@@ -45,7 +75,21 @@ if (Test-Path $stateFile) {
         # live_sync is the current name; fable_bar is the old one, still honored.
         if ($null -ne $st.live_sync)   { $cfg.live_sync   = $st.live_sync }
         elseif ($null -ne $st.fable_bar) { $cfg.live_sync = $st.fable_bar }
-    } catch { }
+        # Codex as a second provider - opt-in, same shape as live_sync. Keys read here
+        # or they are invisible to the widget: this merge is an explicit allow-list, not
+        # a wholesale copy.
+        if ($null -ne $st.codex)     { $cfg.codex     = $st.codex }
+        if ($null -ne $st.codex_exe) { $cfg.codex_exe = $st.codex_exe }
+        # Manual provider pick and when it was made. Both are needed: the pick holds only
+        # until the OTHER provider shows activity newer than the pick.
+        if ($null -ne $st.provider)          { $cfg.provider          = $st.provider }
+        if ($null -ne $st.provider_picked_at) { $cfg.provider_picked_at = $st.provider_picked_at }
+    } catch {
+        # A hand-edit with an unescaped backslash (e.g. "codex_exe": "C:\Users\...") makes
+        # the whole file unparseable, and every setting in it - position, live_sync, codex -
+        # silently reverts to defaults. Say so once instead of leaving the user to guess.
+        Write-ErrorLog ("window-state.json could not be parsed; using defaults - " + $_.Exception.Message)
+    }
 }
 # Opt-in live sync via the oauth/usage endpoint (undocumented; see README). This is
 # the PRIMARY data source for desktop-app users, who get no statusLine feed. Accept
@@ -53,6 +97,15 @@ if (Test-Path $stateFile) {
 # live_sync wins whenever it is set at all - so an explicit `live_sync: false` overrides
 # a stale legacy `fable_bar: true`. Fall back to the old key only when live_sync is absent.
 $LIVE_SYNC_ON = if ($null -ne $cfg.live_sync) { $cfg.live_sync -eq $true } else { $cfg.fable_bar -eq $true }
+# Opt-in Codex provider. When off the widget behaves exactly as it always has: Claude
+# only, no provider tab, and capture-codex.ps1 is never spawned.
+$CODEX_ON = ($cfg.codex -eq $true)
+# Both Codex runtime files live outside the repo: the repo is OneDrive-synced, which
+# rewrites mtimes (forging the activity signal) and churns on a 3-minute rewrite.
+$MOTH_DATA_DIR  = Join-Path $env:LOCALAPPDATA 'Moth'
+$codexCacheFile = Join-Path $MOTH_DATA_DIR 'codex-cache.json'
+$activityFile   = Join-Path $MOTH_DATA_DIR 'activity.json'
+$codexHelper    = Join-Path $root 'capture-codex.ps1'
 # Coerce every numeric setting back to a real number (the README invites hand-edits),
 # then clamp the ones where a bad range breaks the widget: a 0/negative timer interval
 # is a busy loop, and a non-positive track width kills the XAML parse.
@@ -97,6 +150,19 @@ $xaml = @"
           </Canvas>
           <TextBlock Text="Moth" Foreground="#F5E9D5" FontFamily="Segoe UI" FontSize="12" FontWeight="SemiBold"
                      VerticalAlignment="Center"/>
+          <!-- Provider switch. Collapsed entirely until a second provider has data, so
+               the Claude-only card is untouched. Sits in the drag area, so the handlers
+               mark the event Handled on BUTTON-DOWN like MinBtn/CloseBtn - an Up-based
+               click never fires because DragMove swallows the mouse-up. -->
+          <StackPanel x:Name="TabGroup" Orientation="Horizontal" VerticalAlignment="Center"
+                      Margin="8,0,0,0" Visibility="Collapsed">
+            <TextBlock x:Name="TabClaude" Text="Claude" FontFamily="Segoe UI" FontSize="11"
+                       Foreground="#6E6552" Cursor="Hand" VerticalAlignment="Center"/>
+            <TextBlock Text="/" FontFamily="Segoe UI" FontSize="11" Foreground="#3A362C"
+                       Margin="4,0,4,0" VerticalAlignment="Center"/>
+            <TextBlock x:Name="TabCodex" Text="Codex" FontFamily="Segoe UI" FontSize="11"
+                       Foreground="#6E6552" Cursor="Hand" VerticalAlignment="Center"/>
+          </StackPanel>
         </StackPanel>
         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
           <TextBlock x:Name="MinBtn" Text="&#8211;" Foreground="#5A5240" FontFamily="Segoe UI" FontSize="16"
@@ -187,6 +253,7 @@ $Pct5    = $win.FindName('Pct5');  $Fill5 = $win.FindName('Fill5');  $Reset5 = $
 $Hourglass5 = $win.FindName('Hourglass5'); $Hourglass5Rot = $win.FindName('Hourglass5Rot')
 $Pct7    = $win.FindName('Pct7');  $Fill7 = $win.FindName('Fill7');  $Reset7 = $win.FindName('Reset7')
 $FableGroup = $win.FindName('FableGroup'); $FableLabel = $win.FindName('FableLabel')
+$TabGroup = $win.FindName('TabGroup'); $TabClaude = $win.FindName('TabClaude'); $TabCodex = $win.FindName('TabCodex')
 $PctF    = $win.FindName('PctF');  $FillF = $win.FindName('FillF');  $ResetF = $win.FindName('ResetF')
 $Updated = $win.FindName('Updated')
 $BarsPanel = $win.FindName('BarsPanel')
@@ -260,6 +327,124 @@ function Read-Cache {
     return $c
 }
 
+# The Codex cache is written by capture-codex.ps1 and has a DIFFERENT contract to the
+# Claude one, even though it borrows the same field names so the helper can reuse the
+# shared parsers: only five_hour is required (some plans report no weekly bucket at
+# all), and a null resets_at is legitimate rather than corrupt - at 0% used there is no
+# open window to reset. Only Read-CodexCache knows this file's fields; everything
+# downstream consumes the provider view built from it.
+function Read-CodexCache {
+    if (-not (Test-Path $codexCacheFile)) { return $null }
+    try { $c = Get-Content $codexCacheFile -Raw | ConvertFrom-Json } catch { return $null }
+    # An ERROR-ONLY cache (last_error, no buckets) is a valid shape, not a broken one: the
+    # helper writes it whenever a poll fails, and it is the whole mechanism by which the
+    # card explains itself. Rejecting it here is what made "turn the flag on and nothing
+    # happens" the experience for anyone whose Codex was missing or signed out.
+    $hasBuckets = ($c.five_hour -and (Test-Numeric $c.five_hour.used_percentage) -and (Test-Numeric $c.captured_at))
+    if (-not $hasBuckets -and -not $c.last_error) { return $null }
+    # Weekly is optional; drop just that bucket when it is malformed.
+    if ($hasBuckets -and $c.seven_day -and -not (Test-Numeric $c.seven_day.used_percentage)) {
+        $c.PSObject.Properties.Remove('seven_day')
+    }
+    return $c
+}
+
+# Per-provider "the user actually did something" stamps, written by touch-activity.ps1.
+# Deliberately NOT derived from either usage cache: the statusLine rewrites captured_at
+# every ~15s while a Claude session is merely open, and the live_sync poll rewrites it
+# every 3 minutes with no session at all - auto-following that would yank the card back
+# to Claude seconds after every Codex turn.
+#
+# Codex has no hook entry installed (whether the desktop app fires them is unconfirmed),
+# so its stamp comes from the newest sessions rollout file, which only grows on real
+# turns. logs_2.sqlite-wal is deliberately NOT used: it advances on its own roughly
+# every 12 seconds, so it is a heartbeat, not activity.
+$script:codexRolloutDir = Join-Path $env:USERPROFILE '.codex\sessions'
+function Read-Activity {
+    $claude = $null; $codex = $null
+    if (Test-Path $activityFile) {
+        try {
+            $a = Get-Content $activityFile -Raw | ConvertFrom-Json
+            if (Test-Numeric $a.claude) { $claude = [long]$a.claude }
+            if (Test-Numeric $a.codex)  { $codex  = [long]$a.codex }
+        } catch { }
+    }
+    if ($null -eq $codex -and (Test-Path $script:codexRolloutDir)) {
+        try {
+            $newest = Get-ChildItem $script:codexRolloutDir -Recurse -Filter 'rollout-*.jsonl' -File -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+            if ($newest) { $codex = [long][DateTimeOffset]::new($newest.LastWriteTimeUtc, [TimeSpan]::Zero).ToUnixTimeSeconds() }
+        } catch { }
+    }
+    # A stamp from the future (clock step, hand edit) would pin the pick forever.
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    if ($null -ne $claude -and $claude -gt $now) { $claude = $now }
+    if ($null -ne $codex  -and $codex  -gt $now) { $codex  = $now }
+    return [pscustomobject]@{ claude = $claude; codex = $codex }
+}
+
+# Flatten either cache into ONE shape the paint path and the halo consume, so neither
+# has to know which provider it is looking at or which file the numbers came from.
+# Each bucket carries its own freshness (the pattern the per-model bar already used),
+# because the two providers go stale independently.
+function ConvertTo-ProviderView($provider, $c) {
+    if ($null -eq $c) { return $null }
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    $staleSecs = [int]$cfg.stale_minutes * 60
+
+    # capturedAt stays $null when the cache has none (the error-only shape): casting an
+    # absent stamp to [long] yields 0, which renders as "last synced 496000h ago".
+    $capturedAt = $null
+    $baseStale = $false
+    if (Test-Numeric $c.captured_at) {
+        $capturedAt = [long]$c.captured_at
+        $baseStale = (($now - $capturedAt) -ge $staleSecs)
+    }
+    $p5 = $null
+    if ($c.five_hour -and (Test-Numeric $c.five_hour.used_percentage)) {
+        $p5 = [math]::Max(0, [math]::Min(100, [double]$c.five_hour.used_percentage))
+    }
+
+    $v = [pscustomobject]@{
+        provider    = $provider
+        p5          = $p5
+        r5          = $null
+        p7          = $null
+        r7          = $null
+        stale5      = $baseStale
+        stale7      = $baseStale
+        window5Secs = 18000.0
+        fable       = $null
+        fableStale  = $baseStale
+        capturedAt  = $capturedAt
+        lastError   = $null
+    }
+    # Attach the reason BEFORE the early return - an error-only view is precisely the one
+    # that has nothing but a reason to show.
+    if ($c.last_error) { $v.lastError = $c.last_error }
+    if ($null -eq $p5) { return $v }   # error-only view: no bars, no countdowns to build
+    if (Test-Numeric $c.five_hour.resets_at) { $v.r5 = [long]$c.five_hour.resets_at }
+    if (Test-Numeric $c.five_hour.window_mins) {
+        $w = [double]$c.five_hour.window_mins * 60.0
+        if ($w -gt 0) { $v.window5Secs = $w }
+    }
+    if ($c.seven_day -and (Test-Numeric $c.seven_day.used_percentage)) {
+        $v.p7 = [math]::Max(0, [math]::Min(100, [double]$c.seven_day.used_percentage))
+        if (Test-Numeric $c.seven_day.resets_at) { $v.r7 = [long]$c.seven_day.resets_at }
+    }
+    # Per-model bar is a Claude-only concept and carries its own timestamp, because the
+    # statusLine writer carries the bucket forward untouched while refreshing the
+    # top-level captured_at - a frozen value must not render as live.
+    if ($c.fable -and (Test-Numeric $c.fable.used_percentage)) {
+        $v.fable = $c.fable
+        if (Test-Numeric $c.fable.captured_at) {
+            $v.fableStale = ((($now - [long]$c.fable.captured_at)) -ge $staleSecs)
+        }
+    }
+    if ($c.last_error) { $v.lastError = $c.last_error }
+    return $v
+}
+
 $script:lastSavedPos = $null
 function Save-WindowState {
     # Persist position to the gitignored state file - never rewrite config.json (tracked).
@@ -283,7 +468,7 @@ function Save-WindowState {
         $st.win_w       = $w
         $st.win_h       = $h
         [void]$st.Remove('scale')   # drop the legacy uniform-scale key if present
-        Write-Utf8NoBom $stateFile ([pscustomobject]$st | ConvertTo-Json)
+        Write-StateAtomic $stateFile ([pscustomobject]$st | ConvertTo-Json)
         $script:lastSavedPos = $key
     } catch { }
 }
@@ -312,67 +497,239 @@ function Update-Layout {
     } catch { }
 }
 
-function Update-Display {
-    $c = $script:cache
-    if (-not $c) {
-        $Updated.Text = 'waiting for Claude usage data...'
-        return
-    }
-    $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
-    $ageMin = [math]::Floor(($now - [long]$c.captured_at) / 60)
-    $stale  = $ageMin -ge [int]$cfg.stale_minutes
-    # STALE TREATMENT IS A SOLID-CARD TREATMENT, NEVER OPACITY. A dimmed card reads as
-    # "the widget is broken/transparent". Stale => bars desaturate to a muted grey-amber
-    # and the glow turns off; the card stays fully opaque and the label explains.
-    $STALE_BAR = '#8A7B5E'
+# STALE TREATMENT IS A SOLID-CARD TREATMENT, NEVER OPACITY. A dimmed card reads as
+# "the widget is broken/transparent". Stale => bars desaturate to a muted grey-amber
+# and the glow turns off; the card stays fully opaque and the label explains.
+$STALE_BAR = '#8A7B5E'
 
-    $p5 = [math]::Max(0, [math]::Min(100, ([double]$c.five_hour.used_percentage)))
-    $p7 = [math]::Max(0, [math]::Min(100, ([double]$c.seven_day.used_percentage)))
-    $Pct5.Text = ('{0}%' -f [math]::Round($p5))
-    $Pct7.Text = ('{0}%' -f [math]::Round($p7))
-    $script:p5 = $p5; $script:p7 = $p7   # Update-Layout turns these into fill widths (fluid)
-    $col5 = if ($stale) { $STALE_BAR } else { Get-BarColor $p5 }
-    $col7 = if ($stale) { $STALE_BAR } else { Get-BarColor $p7 }
+# Paint ONE provider view into the bars. Knows nothing about which provider it is or
+# which file the numbers came from - that is the whole point of the view.
+function Show-ProviderView($v) {
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+
+    # A provider can have no reading at all (a failed poll with no prior snapshot). Show
+    # the bar as unknown rather than as a confident 0%.
+    if ($null -eq $v.p5) {
+        $Pct5.Text = '--%'
+        $script:p5 = 0
+        $col5 = $STALE_BAR
+    } else {
+        $Pct5.Text = ('{0}%' -f [math]::Round($v.p5))
+        $script:p5 = $v.p5   # Update-Layout turns these into fill widths (fluid)
+        $col5 = if ($v.stale5) { $STALE_BAR } else { Get-BarColor $v.p5 }
+    }
     $Fill5.Background = [Windows.Media.BrushConverter]::new().ConvertFromString($col5)
+
+    # A provider can report no weekly bucket at all (some Codex plans). Show the bar as
+    # unknown rather than as a fresh 0%, which would read as "you have used nothing".
+    if ($null -eq $v.p7) {
+        $Pct7.Text = '--%'
+        $script:p7 = 0
+        $col7 = $STALE_BAR
+    } else {
+        $Pct7.Text = ('{0}%' -f [math]::Round($v.p7))
+        $script:p7 = $v.p7
+        $col7 = if ($v.stale7) { $STALE_BAR } else { Get-BarColor $v.p7 }
+    }
     $Fill7.Background = [Windows.Media.BrushConverter]::new().ConvertFromString($col7)
+
     # Bar glow: match the bar when fresh, off (transparent) when stale.
     try {
-        if ($Fill5.Effect) { $Fill5.Effect.Opacity = if ($stale) { 0.0 } else { 0.55 }; $Fill5.Effect.Color = [Windows.Media.ColorConverter]::ConvertFromString($col5) }
-        if ($Fill7.Effect) { $Fill7.Effect.Opacity = if ($stale) { 0.0 } else { 0.55 }; $Fill7.Effect.Color = [Windows.Media.ColorConverter]::ConvertFromString($col7) }
+        if ($Fill5.Effect) { $Fill5.Effect.Opacity = if ($v.stale5 -or $null -eq $v.p5) { 0.0 } else { 0.55 }; $Fill5.Effect.Color = [Windows.Media.ColorConverter]::ConvertFromString($col5) }
+        if ($Fill7.Effect) { $Fill7.Effect.Opacity = if ($v.stale7 -or $null -eq $v.p7) { 0.0 } else { 0.55 }; $Fill7.Effect.Color = [Windows.Media.ColorConverter]::ConvertFromString($col7) }
     } catch { }
-    $Reset5.Text = Format-Remaining ([long]$c.five_hour.resets_at)
-    $Reset7.Text = Format-Remaining ([long]$c.seven_day.resets_at)
 
-    # Hourglass: rotate 0deg -> 180deg across the 5-hour window (18000s), recomputed on
-    # every 1s tick so it turns continuously. Hidden until real data exists (the no-cache
-    # branch above returns early). Muted (not hidden) when stale, matching the bars.
-    $secsLeft5 = [long]$c.five_hour.resets_at - $now
-    $frac5 = [math]::Max(0.0, [math]::Min(1.0, 1.0 - ([double]$secsLeft5 / 18000.0)))
-    $Hourglass5Rot.Angle = 180.0 * $frac5
-    $Hourglass5.Foreground = [Windows.Media.BrushConverter]::new().ConvertFromString($(if ($stale) { $STALE_BAR } else { '#B08D53' }))
-    $Hourglass5.Visibility = [Windows.Visibility]::Visible
+    # A null reset is legitimate (no window open yet at 0% used), so blank the countdown
+    # and park the hourglass rather than rendering an epoch-0 "resetting..." forever.
+    $Reset5.Text = if ($null -eq $v.r5) { '' } else { Format-Remaining ([long]$v.r5) }
+    $Reset7.Text = if ($null -eq $v.r7) { '' } else { Format-Remaining ([long]$v.r7) }
 
-    # Per-model weekly bar - rendered only when the cache carries a fable bucket.
-    # This bucket has its OWN timestamp: the statusLine capture carries it forward
-    # unchanged while refreshing the top-level captured_at, so it can go stale on its
-    # own. Grey it when it does, so a frozen value is never shown in full amber.
-    if ($c.fable -and $null -ne $c.fable.used_percentage) {
-        $pf = [math]::Max(0, [math]::Min(100, ([double]$c.fable.used_percentage)))
-        $fableStale = $stale
-        if (Test-Numeric $c.fable.captured_at) {
-            $fableStale = ([math]::Floor(($now - [long]$c.fable.captured_at) / 60)) -ge [int]$cfg.stale_minutes
-        }
+    # Hourglass: rotate 0deg -> 180deg across the 5-hour window, recomputed on every 1s
+    # tick so it turns continuously. Muted (not hidden) when stale, matching the bars.
+    if ($null -eq $v.r5) {
+        $Hourglass5.Visibility = [Windows.Visibility]::Collapsed
+    } else {
+        $secsLeft5 = [long]$v.r5 - $now
+        $frac5 = [math]::Max(0.0, [math]::Min(1.0, 1.0 - ([double]$secsLeft5 / [double]$v.window5Secs)))
+        $Hourglass5Rot.Angle = 180.0 * $frac5
+        $Hourglass5.Foreground = [Windows.Media.BrushConverter]::new().ConvertFromString($(if ($v.stale5) { $STALE_BAR } else { '#B08D53' }))
+        $Hourglass5.Visibility = [Windows.Visibility]::Visible
+    }
+
+    # Per-model weekly bar - Claude-only, and only when that cache carries the bucket.
+    # It has its OWN timestamp: the statusLine capture carries it forward unchanged while
+    # refreshing the top-level captured_at, so a frozen value must never show in amber.
+    if ($v.fable) {
+        $pf = [math]::Max(0, [math]::Min(100, ([double]$v.fable.used_percentage)))
         $PctF.Text = ('{0}%' -f [math]::Round($pf))
         $script:pf = $pf
-        $FillF.Background = [Windows.Media.BrushConverter]::new().ConvertFromString($(if ($fableStale) { $STALE_BAR } else { '#E8A34C' }))
-        if ($c.fable.label) { $FableLabel.Text = ('{0} (weekly)' -f $c.fable.label) }
-        if ($c.fable.resets_at) { $ResetF.Text = Format-Remaining ([long]$c.fable.resets_at) }
+        $FillF.Background = [Windows.Media.BrushConverter]::new().ConvertFromString($(if ($v.fableStale) { $STALE_BAR } else { '#E8A34C' }))
+        if ($v.fable.label) { $FableLabel.Text = ('{0} (weekly)' -f $v.fable.label) }
+        if ($v.fable.resets_at) { $ResetF.Text = Format-Remaining ([long]$v.fable.resets_at) }
         $FableGroup.Visibility = [Windows.Visibility]::Visible
     } else {
         $script:pf = 0
         $FableGroup.Visibility = [Windows.Visibility]::Collapsed
     }
     Update-Layout   # size the (stretchable) bars to the current width + height
+}
+
+# Pure reducer for "which provider should the card show". No I/O, no side effects: the
+# CALLER persists when it reports changed, which keeps this fixture-testable and keeps
+# selection out of the once-a-second paint path.
+#
+# Activity here means a turn/session event (see Read-Activity), never a data refresh.
+# Ties and missing stamps resolve to Claude, the incumbent - a card that flips on a
+# coin-toss at startup is worse than one that is predictably wrong.
+function Resolve-ProviderState($codexOn, $codexPresent, $tClaude, $tCodex, $pick, $pickedAt) {
+    if (-not $codexOn -or -not $codexPresent) {
+        return [pscustomobject]@{ provider = 'claude'; tabVisible = $false; pick = $pick; pickedAt = $pickedAt; changed = $false }
+    }
+    $changed = $false
+    if ($pick -eq 'claude' -or $pick -eq 'codex') {
+        $otherStamp = if ($pick -eq 'claude') { $tCodex } else { $tClaude }
+        $since = if ($null -eq $pickedAt) { 0 } else { [long]$pickedAt }
+        if ($null -ne $otherStamp -and [long]$otherStamp -gt $since) {
+            # The other tool has been used since the pick was made: auto-follow resumes.
+            $changed = $true
+        } else {
+            return [pscustomobject]@{ provider = $pick; tabVisible = $true; pick = $pick; pickedAt = $pickedAt; changed = $false }
+        }
+    }
+    # Auto-follow needs a comparable PAIR of stamps. Codex always has one (its rollout
+    # files), but Claude's only exists once its hook is installed - and a missing stamp
+    # would lose every comparison, pinning the card to Codex forever and silently turning
+    # a Claude widget into a Codex-only one. With one side unknown, keep the incumbent and
+    # let the tab be the mechanism; auto-follow starts working when both signals exist.
+    $provider = 'claude'
+    if ($null -ne $tClaude -and $null -ne $tCodex -and [long]$tCodex -gt [long]$tClaude) { $provider = 'codex' }
+    return [pscustomobject]@{ provider = $provider; tabVisible = $true; pick = $null; pickedAt = $null; changed = $changed }
+}
+
+# Persist the manual pick without touching the size/position keys. Save-WindowState only
+# writes when the POSITION changed, so the pick needs its own read-merge-write.
+function Save-ProviderPick($pick, $pickedAt) {
+    try {
+        $obj = @{}
+        if (Test-Path $stateFile) {
+            try { (Get-Content $stateFile -Raw | ConvertFrom-Json).psobject.Properties | ForEach-Object { $obj[$_.Name] = $_.Value } } catch { }
+        }
+        if ($null -eq $pick) {
+            $obj.Remove('provider') | Out-Null
+            $obj.Remove('provider_picked_at') | Out-Null
+        } else {
+            $obj['provider'] = $pick
+            $obj['provider_picked_at'] = [long]$pickedAt
+        }
+        Write-StateAtomic $stateFile (([pscustomobject]$obj) | ConvertTo-Json -Depth 10)
+    } catch { Write-ErrorLog ("could not persist provider pick - " + $_.Exception.Message) }
+}
+
+# Which provider the card is currently painting, and whether the switch tab is shown.
+# Set by Update-Display; read by the dev dump and (from U4) the tab handlers.
+$script:activeProvider = 'claude'
+$script:tabVisible = $false
+$script:forcedProvider = $null
+$script:codexCache = $null
+$script:tabColClaude = $null
+$script:tabColCodex = $null
+# Manual pick, seeded from the gitignored per-user state and mutated by the tab.
+$script:pick = $(if ($cfg.provider -eq 'claude' -or $cfg.provider -eq 'codex') { [string]$cfg.provider } else { $null })
+$script:pickedAt = $(if (Test-Numeric $cfg.provider_picked_at) { [long]$cfg.provider_picked_at } else { $null })
+# Activity stamps, refreshed by the poll tick - never read from disk in the 1s paint path.
+$script:activity = [pscustomobject]@{ claude = $null; codex = $null }
+
+function Update-Display {
+    # Views are rebuilt every tick, not every poll: staleness and the countdowns have to
+    # advance once a second. This is pure in-memory transformation - the caches
+    # themselves are read on the poll tick.
+    $views = @{}
+    $cv = ConvertTo-ProviderView 'claude' $script:cache
+    if ($cv) { $views['claude'] = $cv }
+    if ($CODEX_ON -or $script:forcedProvider) {
+        $xv = ConvertTo-ProviderView 'codex' $script:codexCache
+        # No cache file at all yet. Say so, rather than showing a Claude-only card that
+        # looks exactly like the flag having done nothing: "checking" until the first
+        # poll has had its chance, then the launch failure it must be if nothing landed
+        # (blocked execution policy, an uncreatable data dir, a helper that died early).
+        if (-not $xv -and $CODEX_ON) {
+            # Measured from the FIRST spawn, which only ever moves forward. Measuring from
+            # the last one meant a helper that launches fine but never publishes (an
+            # unwritable %LOCALAPPDATA%\Moth, a File.Replace that keeps failing) showed
+            # "checking..." for 30s after each spawn and "couldn't start Codex" for the
+            # remaining 150 - two contradictory diagnoses of one steady-state failure,
+            # alternating forever.
+            $waited = if ($null -eq $script:cxFirstStartedAt) { 0 } else { [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - $script:cxFirstStartedAt }
+            $pendingClass = if ($script:cxFirstStartedAt -and $waited -gt 30) { 'spawn-failed' } else { 'pending' }
+            $xv = [pscustomobject]@{
+                provider = 'codex'; p5 = $null; r5 = $null; p7 = $null; r7 = $null
+                stale5 = $false; stale7 = $false; window5Secs = 18000.0
+                fable = $null; fableStale = $false; capturedAt = $null
+                lastError = $(if ($pendingClass -eq 'pending') { $null } else { [pscustomobject]@{ class = 'spawn-failed'; code = $null; message = '' } })
+            }
+        }
+        if ($xv) { $views['codex'] = $xv }
+    }
+    $script:views = $views
+
+    # Selection is a pure reducer over values already in memory. When it clears a pick,
+    # THIS caller persists the clear - the reducer itself stays side-effect free.
+    $r = Resolve-ProviderState $CODEX_ON ($null -ne $views['codex']) `
+            $script:activity.claude $script:activity.codex $script:pick $script:pickedAt
+    if ($r.changed) {
+        $script:pick = $r.pick; $script:pickedAt = $r.pickedAt
+        Save-ProviderPick $r.pick $r.pickedAt
+    }
+    $active = $r.provider
+    if ($script:forcedProvider) { $active = $script:forcedProvider }  # dev render override
+    $script:activeProvider = $active
+    $script:tabVisible = $r.tabVisible
+
+    # The data gate is "does ANY provider have a view", not "is the Claude cache loaded" -
+    # otherwise a Codex-only card would never advance its countdown.
+    $v = $views[$active]
+    if (-not $v -and $views['claude']) { $v = $views['claude']; $active = 'claude'; $script:activeProvider = 'claude' }
+    # ...and the mirror image. Without it a Codex-ONLY user - no terminal Claude Code, so
+    # no usage-cache.json and no Claude activity stamp, which is a setup the README now
+    # tells people to install with -AutoStart - sat on "waiting for Claude usage data..."
+    # forever with the tab COLLAPSED, unable to reach the Codex numbers already in memory.
+    if (-not $v -and $views['codex']) { $v = $views['codex']; $active = 'codex'; $script:activeProvider = 'codex' }
+    if (-not $v) {
+        # Name what is actually missing: with Codex on, this is not a Claude-only wait.
+        $Updated.Text = if ($CODEX_ON) { 'waiting for usage data...' } else { 'waiting for Claude usage data...' }
+        $TabGroup.Visibility = [Windows.Visibility]::Collapsed
+        return
+    }
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    # No timestamp means no snapshot has ever landed, so there is no age to report - the
+    # status text says what is happening instead of inventing an elapsed time.
+    $ageMin = $null
+    if ($null -ne $v.capturedAt) { $ageMin = [math]::Floor(($now - $v.capturedAt) / 60) }
+    $stale  = $v.stale5
+
+    Show-ProviderView $v
+
+    # Tab: only once a second provider actually has data, so the Claude-only card is
+    # untouched. Brushes are set on change only - this runs once a second.
+    $tabVis = if ($script:tabVisible) { [Windows.Visibility]::Visible } else { [Windows.Visibility]::Collapsed }
+    if ($TabGroup.Visibility -ne $tabVis) { $TabGroup.Visibility = $tabVis }
+    if ($script:tabVisible) {
+        # "Claude" and "Codex" both start with C, so a single-letter abbreviation would
+        # render two identical tabs at exactly the width where it kicks in.
+        $narrow = ([double]$win.Width -lt 260.0)
+        $lblC = if ($narrow) { 'Cl' } else { 'Claude' }
+        $lblX = if ($narrow) { 'Co' } else { 'Codex' }
+        if ($TabClaude.Text -ne $lblC) { $TabClaude.Text = $lblC }
+        if ($TabCodex.Text  -ne $lblX) { $TabCodex.Text  = $lblX }
+        $cCol = if ($active -eq 'claude') { '#F5E9D5' } else { '#6E6552' }
+        $xCol = if ($active -eq 'codex')  { '#F5E9D5' } else { '#6E6552' }
+        if ($script:tabColClaude -ne $cCol) {
+            $TabClaude.Foreground = [Windows.Media.BrushConverter]::new().ConvertFromString($cCol); $script:tabColClaude = $cCol
+        }
+        if ($script:tabColCodex -ne $xCol) {
+            $TabCodex.Foreground = [Windows.Media.BrushConverter]::new().ConvertFromString($xCol); $script:tabColCodex = $xCol
+        }
+    }
 
     # Card is ALWAYS fully opaque - staleness lives in the bars + label, never opacity.
     $Card.Opacity = 1.0
@@ -380,10 +737,21 @@ function Update-Display {
     # soft amber when you're fine, warming to orange/red and brightening as you near a
     # limit ("the flame rising"). Blur stays fixed (<= inset margin) so corners never clip;
     # only colour + opacity change. Muted grey + dim when stale, matching the bars.
+    # It tracks the hottest limit across BOTH providers, so it can warn about the one you
+    # are not looking at - the tab is how you find out which. Only FRESH buckets count: a
+    # frozen snapshot must not hold the card red for days (the per-model bar used to).
     try {
         if ($Card.Effect) {
-            $heat = [math]::Max($p5, [math]::Max($p7, [double]$script:pf))
-            if ($stale) {
+            $heat = $null
+            foreach ($pv in $views.Values) {
+                if (-not $pv.stale5) { if ($null -eq $heat -or $pv.p5 -gt $heat) { $heat = $pv.p5 } }
+                if ($null -ne $pv.p7 -and -not $pv.stale7) { if ($null -eq $heat -or $pv.p7 -gt $heat) { $heat = $pv.p7 } }
+                if ($pv.fable -and -not $pv.fableStale) {
+                    $pfv = [double]$pv.fable.used_percentage
+                    if ($null -eq $heat -or $pfv -gt $heat) { $heat = $pfv }
+                }
+            }
+            if ($null -eq $heat) {
                 $Card.Effect.Color   = [Windows.Media.ColorConverter]::ConvertFromString($STALE_BAR)
                 $Card.Effect.Opacity = 0.12
             } else {
@@ -392,7 +760,38 @@ function Update-Display {
             }
         }
     } catch { }
-    if ($script:epExpired -and $stale) {
+    # Status text belongs to the VISIBLE provider. A Claude token hint printed under
+    # Codex bars would tell the user to fix something unrelated to what they can see.
+    if ($active -eq 'codex') {
+        $cls  = if ($v.lastError) { [string]$v.lastError.class } else { '' }
+        $code = if ($v.lastError -and (Test-Numeric $v.lastError.code)) { [int]$v.lastError.code } else { $null }
+        $msg  = if ($v.lastError) { [string]$v.lastError.message } else { '' }
+        if ($cls -eq 'binary-missing')  { $Updated.Text = 'Codex app-server not found' }
+        elseif ($cls -eq 'spawn-failed'){ $Updated.Text = "couldn't start Codex" }
+        # 'exited' and 'no-reply' are separate from 'parse-fail' on purpose: a CLI that
+        # died on startup and one that answered with an unusable shape are different
+        # problems with different fixes, and the Mac plugin already told them apart.
+        elseif ($cls -eq 'exited')      { $Updated.Text = 'Codex quit before answering' }
+        elseif ($cls -eq 'no-reply')    { $Updated.Text = 'Codex never answered' }
+        elseif ($cls -eq 'parse-fail')  { $Updated.Text = 'Codex reply had no usable limits' }
+        elseif ($cls -eq 'rpc-error') {
+            # -32600 is JSON-RPC's generic "invalid request" - the server returns it for
+            # rejected params too, so only the message makes it a sign-in problem.
+            if     ($code -eq -32600 -and $msg -match '(?i)auth') { $Updated.Text = 'sign in to Codex to sync' }
+            elseif ($code -eq -32601) { $Updated.Text = 'Codex too old for rateLimits/read' }
+            elseif ($code -eq -32603) { $Updated.Text = 'Codex sync failed' }
+            elseif ($code -eq -32001) { $Updated.Text = 'Codex overloaded, retrying' }
+            elseif ($null -ne $code)  { $Updated.Text = ('Codex error {0}' -f $code) }
+            else                      { $Updated.Text = 'Codex sync failed' }
+        }
+        elseif ($cls -eq 'timeout')     { $Updated.Text = 'codex: poll timed out' }
+        elseif ($null -eq $ageMin)      { $Updated.Text = 'Codex: checking...' }
+        elseif ($stale) {
+            $Updated.Text = if ($ageMin -ge 60) { ('codex: last synced {0}h ago' -f [math]::Floor($ageMin/60)) } else { ('codex: last synced {0}m ago' -f $ageMin) }
+        } else {
+            $Updated.Text = if ($ageMin -le 0) { 'codex: updated just now' } else { ('codex: updated {0}m ago' -f $ageMin) }
+        }
+    } elseif ($script:epExpired -and $stale) {
         # Expired token is NOT a login problem - the user IS logged in; the file just
         # aged out. Say what's actually happening (nudge in flight) or what actually
         # fixes it (any fresh Claude session rewrites the file).
@@ -414,11 +813,118 @@ function Update-Display {
 # ---- timers ----
 $poll = New-Object Windows.Threading.DispatcherTimer
 $poll.Interval = [TimeSpan]::FromSeconds([double]$cfg.poll_seconds)
-$poll.Add_Tick({ $script:cache = Read-Cache; Update-Display; Save-WindowState })
+# The poll tick owns ALL file reads for the render path; Update-Display and the 1s tick
+# are pure in-memory work so a provider switch can never cost disk I/O once a second.
+$poll.Add_Tick({
+    $script:cache = Read-Cache
+    if ($CODEX_ON) {
+        $script:codexCache = Read-CodexCache
+        $script:activity = Read-Activity
+        # A Codex turn just landed: refresh now instead of waiting out the Codex interval,
+        # so the bars lag a turn by one poll tick rather than by up to three minutes.
+        if ($null -ne $script:activity.codex -and $null -ne $script:cxLastActivity -and
+            $script:activity.codex -gt $script:cxLastActivity) { Invoke-CodexPoll }
+        $script:cxLastActivity = $script:activity.codex
+        # A poll deferred by the spacing floor is honoured on the first tick that clears
+        # it, so a turn's refresh is delayed rather than lost.
+        if ($script:cxWanted) { Invoke-CodexPoll }
+    }
+    Update-Display
+    Save-WindowState
+})
 
 $tick = New-Object Windows.Threading.DispatcherTimer
 $tick.Interval = [TimeSpan]::FromSeconds(1)
-$tick.Add_Tick({ if ($script:cache) { Update-Display } })
+$tick.Add_Tick({ if ($script:cache -or $script:codexCache) { Update-Display } })
+
+# ---- Codex poll (opt-in): fire-and-forget the helper, never talk to Codex from here ----
+# Every timer here runs on the WPF dispatcher thread, so anything that blocks freezes the
+# card. Talking to `codex app-server` means a process spawn plus a live backend call - so
+# the widget only LAUNCHES capture-codex.ps1 and reads the cache it publishes. The helper
+# owns the exchange, its own 8s deadline, and killing its child.
+$CX_BASE_SECONDS = 180
+# Floor between spawns. The rollout file advances on every streamed Codex turn and the
+# poll tick fires an immediate helper whenever it does, so without this an agentic run
+# spawns an app-server - plus a backend call and a possible auth.json refresh - on every
+# poll tick, roughly every 15 seconds. A deferred poll is remembered, not dropped.
+$CX_MIN_SPACING = 60
+$script:cxBackoff = $CX_BASE_SECONDS
+$script:cxProc = $null
+# Seeded from DISK, not from $null. The floor lived only in memory, so every /moth restart
+# reset it and the 3-second first-paint poll fired immediately - and the README tells users
+# to type /moth after turning Codex on, after turning it off, and after any config edit.
+# Six /moth in a minute was six real app-server launches, six live rate-limit calls, and
+# six chances to rewrite ~/.codex/auth.json: exactly the cost this floor exists to bound.
+# The helper's own timestamps are the only record that survives the process.
+$script:cxStartedAt = $(
+    try {
+        if (Test-Path $codexCacheFile) {
+            $c = Get-Content $codexCacheFile -Raw | ConvertFrom-Json
+            $stamps = @()
+            if (Test-Numeric $c.captured_at) { $stamps += [long]$c.captured_at }
+            if ($c.last_error -and (Test-Numeric $c.last_error.at)) { $stamps += [long]$c.last_error.at }
+            # A stamp from the future (clock step, hand edit) must not floor us forever.
+            $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+            $ok = @($stamps | Where-Object { $_ -le $now })
+            if ($ok.Count) { ($ok | Measure-Object -Maximum).Maximum } else { $null }
+        } else { $null }
+    } catch { $null }
+)
+$script:cxFirstStartedAt = $null
+$script:cxLastActivity = $null
+$script:cxWanted = $false
+
+function Invoke-CodexPoll {
+    try {
+        # Still running from last time? Skip rather than stack helpers. The helper also
+        # holds a named mutex, which covers the case where a widget restart forgot the
+        # in-flight child.
+        if ($script:cxProc -and -not $script:cxProc.HasExited) {
+            $ageSec = ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - $script:cxStartedAt)
+            # The helper's own deadline is the real bound; this is the anomaly path for a
+            # helper that somehow outlived it. .NET Framework has no process-tree kill, so
+            # use taskkill /T to make sure its codex.exe child goes too.
+            if ($ageSec -gt 30) {
+                Write-ErrorLog ("codex: helper still running after {0}s - terminating tree" -f $ageSec)
+                try { Start-Process 'taskkill.exe' -ArgumentList '/PID', $script:cxProc.Id, '/T', '/F' -WindowStyle Hidden -ErrorAction SilentlyContinue } catch { }
+                $script:cxProc = $null
+            }
+            return
+        }
+        if (-not (Test-Path $codexHelper)) { return }
+        $sinceLast = if ($null -eq $script:cxStartedAt) { [int]::MaxValue }
+                     else { [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - $script:cxStartedAt }
+        if ($sinceLast -lt $CX_MIN_SPACING) { $script:cxWanted = $true; return }
+        $script:cxWanted = $false
+        # Hidden via ShellExecute (SW_HIDE), the same idiom as the token nudge: the console
+        # is created already hidden rather than flashing and then hiding. No -Wait (that
+        # would block the dispatcher) and no output redirection.
+        # QUOTE THE PATH. Start-Process joins -ArgumentList with spaces and does NOT quote,
+        # so an unquoted path containing a space (this repo lives under "Claude Projects")
+        # splits into two arguments and powershell.exe dies with 0xFFFD0000 before running
+        # anything - a launch that "succeeds" from here and silently never polls.
+        $script:cxProc = Start-Process 'powershell.exe' -PassThru -WindowStyle Hidden -ArgumentList @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $codexHelper + '"'))
+        $script:cxStartedAt = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        # Latched once: this is what the pending/spawn-failed classification measures, and
+        # it must only ever move forward.
+        if ($null -eq $script:cxFirstStartedAt) { $script:cxFirstStartedAt = $script:cxStartedAt }
+        # Success resets the interval, not just the variable - restoring only the variable
+        # once pinned polling at the backoff ceiling forever (the live_sync bug).
+        $script:cxBackoff = $CX_BASE_SECONDS
+        $cx.Interval = [TimeSpan]::FromSeconds($CX_BASE_SECONDS)
+    } catch {
+        Write-ErrorLog ("codex: could not launch helper - " + $_.Exception.Message)
+        # Back off, but never past the point where a HEALTHY provider would look stale.
+        $ceiling = [math]::Max($CX_BASE_SECONDS, ([int]$cfg.stale_minutes * 60) - 60)
+        $script:cxBackoff = [math]::Min($ceiling, $script:cxBackoff * 2)
+        $cx.Interval = [TimeSpan]::FromSeconds($script:cxBackoff)
+    }
+}
+
+$cx = New-Object Windows.Threading.DispatcherTimer
+$cx.Interval = [TimeSpan]::FromSeconds($CX_BASE_SECONDS)
+$cx.Add_Tick({ Invoke-CodexPoll })
 
 # ---- live sync: oauth/usage endpoint poll (PRIMARY source for desktop-app users) ----
 # The desktop app never runs the statusLine feed, so this endpoint is the only way to
@@ -684,6 +1190,25 @@ $win.Add_Closing({
 # The window is normally taskbar-less (ShowInTaskbar=False); a minimized window with
 # no taskbar entry would be unrecoverable. So: enable the taskbar entry just for the
 # minimized period, and hide it again when the user restores from the taskbar.
+# Provider tabs. Act on BUTTON-DOWN and mark the event Handled, exactly like MinBtn and
+# CloseBtn: the window-level Down handler starts DragMove, which swallows the mouse-up,
+# so an Up-based click would never fire. Consequence: the tab is not a drag handle - the
+# "Moth" wordmark beside it still is.
+function Set-ProviderPick($provider) {
+    $script:pick = $provider
+    $script:pickedAt = [long][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    Save-ProviderPick $script:pick $script:pickedAt
+    Update-Display
+}
+$TabClaude.Add_MouseLeftButtonDown({
+    $_.Handled = $true
+    try { Set-ProviderPick 'claude' } catch { Write-ErrorLog ("tab claude - " + $_.Exception.Message) }
+})
+$TabCodex.Add_MouseLeftButtonDown({
+    $_.Handled = $true
+    try { Set-ProviderPick 'codex' } catch { Write-ErrorLog ("tab codex - " + $_.Exception.Message) }
+})
+
 $MinBtn.Add_MouseLeftButtonDown({
     $_.Handled = $true
     $win.ShowInTaskbar = $true
@@ -696,6 +1221,16 @@ $win.Add_StateChanged({
 if ($SelfTest -or $Screenshot) {
     if ($SelfTest -and $SelfTest -ne 'empty') { $script:cache = (Get-Content $SelfTest -Raw | ConvertFrom-Json) }
     elseif ($Screenshot -and (Test-Path $cacheFile)) { $script:cache = (Get-Content $cacheFile -Raw | ConvertFrom-Json) }
+    # Codex side: an explicit fixture, else the live Codex cache for -Screenshot. Loaded
+    # raw the same way the Claude cache is, so a fixture can exercise shapes Read-CodexCache
+    # would reject.
+    # 'empty' is an ANSWER, not a missing argument: it means "render with no Codex
+    # snapshot" and must not fall through to the live cache, or a hero frame rendered on
+    # the author's machine would quietly carry the author's real Codex percentages.
+    if ($CodexFixture -eq 'empty') { }
+    elseif ($CodexFixture) { $script:codexCache = (Get-Content $CodexFixture -Raw | ConvertFrom-Json) }
+    elseif ($Screenshot -and (Test-Path $codexCacheFile)) { $script:codexCache = (Get-Content $codexCacheFile -Raw | ConvertFrom-Json) }
+    if ($Provider) { $script:forcedProvider = $Provider }
     # The window is never shown here, so nothing lays it out. Detach the content and force a
     # layout pass at the window size so the fluid bars (and ActualWidth) are real.
     $ww = [double]$win.Width; $wh = [double]$win.Height
@@ -708,8 +1243,15 @@ if ($SelfTest -or $Screenshot) {
         $fableDump = if ($FableGroup.Visibility -eq [Windows.Visibility]::Visible) {
             "Fable[vis {0}='{1}' {2} reset='{3}']" -f $PctF.Text, $FableLabel.Text, [math]::Round($FillF.Width,1), $ResetF.Text
         } else { "Fable[collapsed]" }
-        Write-Output ("SELFTEST OK | Pct5={0} Fill5W={1} Reset5='{2}' | Pct7={3} Fill7W={4} Reset7='{5}' | {6} | Win={7}x{8} | Opacity={9} | {10}" -f `
-            $Pct5.Text, [math]::Round($Fill5.Width,1), $Reset5.Text, $Pct7.Text, [math]::Round($Fill7.Width,1), $Reset7.Text, $Updated.Text, [int]$ww, [int]$wh, $Card.Opacity, $fableDump)
+        $provDump = "Provider={0} Tab={1}" -f $script:activeProvider, $(if ($script:tabVisible) { 'visible' } else { 'hidden' })
+        # Halo is the cross-provider signal, so it has to be assertable without eyeballing
+        # a screenshot: it can be driven by a provider that is not even on screen.
+        $haloDump = if ($Card.Effect) {
+            "Halo={0}/{1:N2}" -f $Card.Effect.Color, $Card.Effect.Opacity
+        } else { "Halo=none" }
+        $provDump = "$provDump $haloDump"
+        Write-Output ("SELFTEST OK | Pct5={0} Fill5W={1} Reset5='{2}' | Pct7={3} Fill7W={4} Reset7='{5}' | {6} | Win={7}x{8} | Opacity={9} | {10} | {11}" -f `
+            $Pct5.Text, [math]::Round($Fill5.Width,1), $Reset5.Text, $Pct7.Text, [math]::Round($Fill7.Width,1), $Reset7.Text, $Updated.Text, [int]$ww, [int]$wh, $Card.Opacity, $fableDump, $provDump)
     }
     if ($Screenshot) {
         $Card.Opacity = 1.0
@@ -745,8 +1287,35 @@ if (-not $script:mutexNew) {
 
 $win.Add_SourceInitialized({
     $script:cache = Read-Cache
+    # Read the Codex side once before first paint so the card OPENS on the right provider
+    # rather than flipping to it up to a poll interval later.
+    if ($CODEX_ON) {
+        $script:codexCache = Read-CodexCache
+        $script:activity = Read-Activity
+        # Seed from the file so the first poll tick does not read an "advance" that is
+        # really just the first read and fire a spurious immediate poll.
+        $script:cxLastActivity = $script:activity.codex
+    }
     Update-Display
     $poll.Start(); $tick.Start()
+    # Codex polling starts BEFORE the endpoint poll. Invoke-EndpointPoll runs
+    # synchronously here and can take up to its 15s timeout; anything after it is at the
+    # mercy of it returning cleanly, and a start that never happens is invisible.
+    # Starting a timer is instant, so it goes first.
+    # This is also the ONLY place polling starts, so a headless -SelfTest / -Screenshot
+    # run (which returns long before this) can never spawn a helper. The first poll is
+    # left to the timer rather than fired now: first paint must not wait on a spawn.
+    if ($CODEX_ON) {
+        $cx.Start(); Write-ErrorLog 'codex: polling enabled'
+        # First snapshot seconds after first paint, not three minutes later. A one-shot
+        # timer, not an inline call: first paint must not wait on a process spawn. It
+        # cannot fire until this handler returns, so with live sync on it lands after
+        # the synchronous endpoint fetch below.
+        $cxFirst = New-Object Windows.Threading.DispatcherTimer
+        $cxFirst.Interval = [TimeSpan]::FromSeconds(3)
+        $cxFirst.Add_Tick({ $cxFirst.Stop(); Invoke-CodexPoll }.GetNewClosure())
+        $cxFirst.Start()
+    }
     if ($LIVE_SYNC_ON) { $ep.Start(); Invoke-EndpointPoll }   # immediate first fetch
 })
 

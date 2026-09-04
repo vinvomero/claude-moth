@@ -1,2 +1,7 @@
 # Shell scripts must stay LF (CRLF breaks the shebang on macOS/Linux)
 *.sh text eol=lf
+
+# The Mac golden is diffed byte-for-byte against the plugin's own LF output, so a
+# CRLF checkout on Windows would fail the test for a reason that has nothing to do
+# with the plugin.
+tools/fixtures/mac-golden-codex-absent.txt text eol=lf
