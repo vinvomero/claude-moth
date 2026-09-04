@@ -101,6 +101,10 @@ $binA = Join-Path $tmp 'bin\aaa'; $binB = Join-Path $tmp 'bin\bbb'
 New-Item -ItemType Directory -Path $binA -Force | Out-Null
 New-Item -ItemType Directory -Path $binB -Force | Out-Null
 $exeA = Join-Path $binA 'codex.exe'; $exeB = Join-Path $binB 'codex.exe'
+# BOM-less UTF-8, the repo's one idiom for writing a file. Set-Content -Encoding UTF8 on
+# PowerShell 5.1 prepends a BOM - install.ps1 byte-checks its own output and throws if one
+# appears, so a test that writes one is writing a fixture the product would reject.
+function W8($p, $t) { [System.IO.File]::WriteAllText($p, $t, (New-Object System.Text.UTF8Encoding($false))) }
 Set-Content -LiteralPath $exeA -Value 'stub'
 Set-Content -LiteralPath $exeB -Value 'stub'
 # bbb is the NEWEST by write time, so any result of aaa proves the config record won.
@@ -108,8 +112,8 @@ Set-Content -LiteralPath $exeB -Value 'stub'
 (Get-Item $exeB).LastWriteTimeUtc = [DateTime]::UtcNow
 $cfgGood = Join-Path $tmp 'good.toml'
 $cfgDead = Join-Path $tmp 'dead.toml'
-Set-Content -LiteralPath $cfgGood -Value ("CODEX_CLI_PATH = '" + $exeA + "'") -Encoding UTF8
-Set-Content -LiteralPath $cfgDead -Value ("CODEX_CLI_PATH = '" + (Join-Path $tmp 'gone\codex.exe') + "'") -Encoding UTF8
+W8 $cfgGood ("CODEX_CLI_PATH = '" + $exeA + "'")
+W8 $cfgDead ("CODEX_CLI_PATH = '" + (Join-Path $tmp 'gone\codex.exe') + "'")
 $binRoot = Join-Path $tmp 'bin'
 
 Check 'override wins'            (Find-CodexExe $exeB $cfgGood $binRoot)   $exeB

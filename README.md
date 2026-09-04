@@ -305,14 +305,19 @@ it **runs a program on your machine**. Here is everything it does.
 **1. It uses an experimental interface.** `codex app-server` is OpenAI's local JSON-RPC
 server for editor integrations. It is not a documented public API, and the method Moth
 calls (`account/rateLimits/read`) can change or vanish in any release. When it does, Moth
-says so in plain words — "this Codex build is too old to report rate limits" — instead of
-showing you a stale number.
+says so in plain words — the widget shows `Codex too old for rateLimits/read` — instead of
+showing you a stale number. Every failure gets its own name: a CLI that never started, one
+that quit before answering, one that answered with nothing usable, and each JSON-RPC error
+code are four different messages, because they have four different fixes.
 
 **2. It launches a hidden process, as you, on a timer.** Roughly every **3 minutes** while
 Moth is running, and again shortly after a Codex turn — never more often than once every
-**60 seconds**. It runs `codex -s read-only -a never app-server --stdio` with no console
-window, waits at most 8 seconds, kills the whole process tree, and exits. It never runs
-the bare `codex` command, which can open an interactive browser sign-in.
+**60 seconds**, including across a `/moth` restart (the floor is read back from the last
+snapshot on disk, not just held in memory). It runs
+`codex -s read-only -a never app-server --stdio` with no console window, gives it **8
+seconds** to answer, then closes the pipe and kills the whole process tree — a hung one can
+take a couple of seconds more to tear down. It never runs the bare `codex` command, which
+can open an interactive browser sign-in.
 
 **3. Moth never reads your Codex credentials — but the process it starts does.**
 `~/.codex/auth.json` is never opened by any Moth script. The app-server owns its own login
@@ -326,10 +331,11 @@ including any **MCP servers** you have configured. On codex-cli 0.152.0 this was
 app-server itself. That is an observation of one version, not a guarantee of every version.
 
 **5. Activity is a file's timestamp, never its contents.** To follow the provider you're
-actually using, Moth reads the **modified time** of the newest file under
-`~/.codex/sessions/`. It never opens those files — your prompts and transcripts are not
-read. (It deliberately ignores `logs_2.sqlite-wal`, which ticks every ~12 seconds on its
-own and would report activity that never happened.)
+actually using, Moth reads the **modified time** of the newest `rollout-*.jsonl` under
+`~/.codex/sessions/` — an allow-list of one filename pattern, not a scan of the folder. It
+never opens those files: your prompts and transcripts are not read. (It deliberately
+ignores `logs_2.sqlite-wal`, which ticks every ~12 seconds on its own and would report
+activity that never happened.)
 
 **6. No Codex hooks are installed.** Whether the Codex desktop app fires the hooks in
 `~/.codex/hooks.json` is unconfirmed, and a hook that silently never fires is worse than

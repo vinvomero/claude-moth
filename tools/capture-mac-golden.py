@@ -9,11 +9,17 @@ could never fail that test - it would just record whatever the new code happens 
 So this reads the plugin from a git ref (default HEAD), not the working tree, and the
 golden is committed BEFORE the plugin is edited.
 
-The committed heredoc has no test seams - it reads the environment, opens urllib at
-import time, and exits through bail() - so this patches the two things it touches
-(urllib.request.build_opener and time.time) and catches SystemExit.
+The pre-Codex heredoc had no test seams - it read the environment, opened urllib at import
+time, and exited through a bail() that no longer exists - so this patches the two things it
+touches (urllib.request.build_opener and time.time) and catches SystemExit.
 
-  python tools/capture-mac-golden.py                 # from HEAD, writes the golden
+The default ref is PINNED to the last commit before the Codex section landed, for two
+reasons. Running against a later ref regenerates the oracle from the code it is supposed to
+judge, which makes the test tautological forever and silently. And the current plugin ends
+with an `if __name__ == "__main__"` guard, so exec'ing it as a module - which is what this
+does - runs nothing at all and would write an EMPTY golden while reporting success.
+
+  python tools/capture-mac-golden.py                 # from the pinned pre-Codex ref
   python tools/capture-mac-golden.py --ref abc1234   # from any ref
   python tools/capture-mac-golden.py --print         # show it, write nothing
 """
@@ -36,6 +42,8 @@ FIXTURES = ROOT / "tools" / "fixtures"
 CLAUDE_FIXTURE = FIXTURES / "mac-claude-usage.json"
 GOLDEN = FIXTURES / "mac-golden-codex-absent.txt"
 PLUGIN = "mac/moth.5m.sh"
+# The last commit before the Codex section. Pinned, not HEAD: see the module docstring.
+PRE_CODEX_REF = "9f69780"
 
 
 def extract_heredoc(text):
@@ -84,7 +92,7 @@ def run_plugin_python(source, payload, cred):
         # a future `if __name__ == "__main__"` guard must not fire twice.
         exec(compile(source, PLUGIN, "exec"), {"__name__": "moth_mac_plugin"})
     except SystemExit:
-        pass  # bail() is a normal exit path, not a failure
+        pass  # the pre-Codex heredoc exited through bail(); that was a normal path
     finally:
         urllib.request.build_opener, time.time = real_opener, real_time
         sys.stdout = real_stdout
@@ -97,7 +105,7 @@ def run_plugin_python(source, payload, cred):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ref", default="HEAD", help="git ref to read the plugin from")
+    ap.add_argument("--ref", default=PRE_CODEX_REF, help="git ref to read the plugin from")
     ap.add_argument("--print", dest="show", action="store_true", help="print, do not write")
     args = ap.parse_args()
 
@@ -112,6 +120,17 @@ def main():
     if args.show:
         sys.stdout.write(text)
         return
+    # Refuse to write nothing. Exec'ing a plugin that guards main() behind
+    # `if __name__ == "__main__"` runs no code and produces an empty string - and silently
+    # overwriting the golden with it would leave the harness passing against an empty
+    # expectation, which is worse than any failure it was built to catch.
+    if not text.strip():
+        raise SystemExit(
+            f"{args.ref}:{PLUGIN} produced no output - it almost certainly guards main() "
+            f'behind `if __name__ == "__main__"`, which this tool deliberately does not '
+            f"trigger. Capture from a pre-Codex ref instead (default: {PRE_CODEX_REF}). "
+            f"Refusing to overwrite {GOLDEN.name}."
+        )
     # newline="" so the golden keeps LF on Windows; the plugin's own output is LF.
     with open(GOLDEN, "w", encoding="utf-8", newline="") as fh:
         fh.write(text)

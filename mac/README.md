@@ -77,12 +77,15 @@ open an issue. The Claude rows above it are never affected.
 |-----|---------------|
 | **Codex CLI not found.** | Nothing at any of the paths listed under it. Set `CODEX_CLI_PATH`. |
 | **Found the Codex CLI, but not the interpreter it needs** | An npm shim whose `node` is gone. Reinstall Node, or use the desktop app's own build. |
-| **macOS blocked it** | Gatekeeper quarantine. Run it once from a terminal, or `xattr -d com.apple.quarantine <path>`. |
+| **The Codex CLI is not executable** | The execute bit is missing — a tarball, an unzip, or a copy off a share all drop it. Run the `chmod +x` the row prints. |
+| **macOS blocked it** | Gatekeeper quarantine: the file *is* executable and macOS still refused it. Run it once from a terminal, or `xattr -d com.apple.quarantine <path>`. |
 | **Sign in to Codex to sync.** | The app-server started but has no ChatGPT login. Run `codex` once and sign in. |
 | **This Codex build is too old to report rate limits.** | Your `codex` predates `account/rateLimits/read`. Update it. |
 | **Codex sync failed.** / **Codex is overloaded** | OpenAI's side, not yours. It'll clear on its own. |
 | **Codex didn't answer in time.** | The app-server started and went quiet. Moth gives up after 12 seconds so your menu never hangs. |
-| **The Codex CLI exited before answering.** | It died on startup; the first line of its own error is shown beneath. |
+| **The Codex CLI exited before answering.** | It died on startup; the exit status and the first line of its own error are shown beneath. |
+| **Codex started but never answered.** | It ran, and either closed its output or talked without ever replying. Different from the row below — nothing came back to parse. |
+| **Codex replied, but with no usable limits.** | It *did* answer; the answer carried no rate-limit window. Usually a plan or account thing, not an install thing. |
 | **Weekly   --%** | Not an error. Your plan reports no weekly window, and `0%` would be a claim rather than a gap. |
 
 ## How it gets the numbers (honest disclosure)
@@ -116,8 +119,20 @@ The Claude side of this plugin only reads. The Codex side **runs a program**, so
   only in the menu until the next one.
 - The reply is copied field by field: percentages, reset times, window lengths. The
   account id and credit balance that arrive alongside them are dropped.
+- **Your Claude token is not passed to it.** The plugin reads that token to call
+  Anthropic, and explicitly strips it from the environment `codex` is started with — by
+  name and by value — so it cannot reach OpenAI's binary or anything that binary forks.
 - **First run will likely prompt.** macOS may ask to confirm running `codex` from a
   background process, and the Keychain may prompt again for Codex's own credentials.
+
+**One known limitation.** Unlike the Windows helper, this plugin holds no lock while it
+talks to Codex. If you click **Refresh** repeatedly during the ~12 seconds an exchange can
+take, each click can start another `codex app-server`, and concurrent app-servers are
+concurrent writers to `~/.codex/auth.json`. Whether SwiftBar already serialises repeat runs
+of one plugin is unverified — this file has never run on a Mac — so the honest advice is:
+click Refresh once and let it finish. If you hit this, please
+[open an issue](https://github.com/vinvomero/claude-moth/issues); a lock is easy to add
+once someone can confirm the behavior on real hardware.
 
 The Windows widget documents the same things in more depth — see the root
 [README](../README.md#codex--the-honest-details-codex).
@@ -127,7 +142,7 @@ The Windows widget documents the same things in more depth — see the root
 > the author's own Mac. Please report anything that misbehaves.
 >
 > That applies double to the Codex section. It is exercised by an automated harness
-> (`tools/test-mac-plugin.py`) that runs this exact script against a fake `codex` — 91
+> (`tools/test-mac-plugin.py`) that runs this exact script against a fake `codex` — 116
 > assertions covering every error row above, and a byte-for-byte diff proving a
 > Claude-only menu is unchanged. But a harness is not a Mac. The parts that have never
 > run on real hardware are the ones macOS owns: Gatekeeper quarantine, the Keychain
