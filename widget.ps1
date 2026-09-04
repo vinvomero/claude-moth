@@ -38,6 +38,24 @@ function Write-Utf8NoBom($path, $text) {
 function Write-ErrorLog($msg) {
     try { Add-Content -Path $logFile -Value ("[{0}] {1}" -f ([DateTime]::UtcNow.ToString('u')), $msg) } catch { }
 }
+# window-state.json is CROSS-PROCESS state: capture-codex.ps1 reads codex_exe out of it
+# every poll. WriteAllText truncates before it writes, so a plain write leaves a window in
+# which the helper reads zero bytes, silently falls back to discovery, and reports
+# "Codex app-server not found" for a Codex that is installed and working - on precisely
+# the unusual-install machines codex_exe exists for. Same atomic-swap discipline
+# capture-codex.ps1 already uses for its own cache.
+function Write-StateAtomic($path, $text) {
+    $tmp = "$path.$PID.tmp"
+    try {
+        Write-Utf8NoBom $tmp $text
+        if (Test-Path -LiteralPath $path) { [System.IO.File]::Replace($tmp, $path, [NullString]::Value) }
+        else { Move-Item -LiteralPath $tmp -Destination $path -Force }
+    } catch {
+        try { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue } catch { }
+        # Last resort: a non-atomic write still beats losing the user's window position.
+        try { Write-Utf8NoBom $path $text } catch { }
+    }
+}
 
 # ---- config (shipped defaults; user-editable) + window state (runtime; gitignored) ----
 $defaults = @{ poll_seconds = 20; stale_minutes = 30; window_left = 60; window_top = 60; win_w = 294; win_h = 270 }
@@ -450,7 +468,7 @@ function Save-WindowState {
         $st.win_w       = $w
         $st.win_h       = $h
         [void]$st.Remove('scale')   # drop the legacy uniform-scale key if present
-        Write-Utf8NoBom $stateFile ([pscustomobject]$st | ConvertTo-Json)
+        Write-StateAtomic $stateFile ([pscustomobject]$st | ConvertTo-Json)
         $script:lastSavedPos = $key
     } catch { }
 }
@@ -603,7 +621,7 @@ function Save-ProviderPick($pick, $pickedAt) {
             $obj['provider'] = $pick
             $obj['provider_picked_at'] = [long]$pickedAt
         }
-        Write-Utf8NoBom $stateFile (([pscustomobject]$obj) | ConvertTo-Json -Depth 10)
+        Write-StateAtomic $stateFile (([pscustomobject]$obj) | ConvertTo-Json -Depth 10)
     } catch { Write-ErrorLog ("could not persist provider pick - " + $_.Exception.Message) }
 }
 
@@ -635,8 +653,14 @@ function Update-Display {
         # poll has had its chance, then the launch failure it must be if nothing landed
         # (blocked execution policy, an uncreatable data dir, a helper that died early).
         if (-not $xv -and $CODEX_ON) {
-            $waited = if ($null -eq $script:cxStartedAt) { 0 } else { [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - $script:cxStartedAt }
-            $pendingClass = if ($script:cxStartedAt -and $waited -gt 30) { 'spawn-failed' } else { 'pending' }
+            # Measured from the FIRST spawn, which only ever moves forward. Measuring from
+            # the last one meant a helper that launches fine but never publishes (an
+            # unwritable %LOCALAPPDATA%\Moth, a File.Replace that keeps failing) showed
+            # "checking..." for 30s after each spawn and "couldn't start Codex" for the
+            # remaining 150 - two contradictory diagnoses of one steady-state failure,
+            # alternating forever.
+            $waited = if ($null -eq $script:cxFirstStartedAt) { 0 } else { [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - $script:cxFirstStartedAt }
+            $pendingClass = if ($script:cxFirstStartedAt -and $waited -gt 30) { 'spawn-failed' } else { 'pending' }
             $xv = [pscustomobject]@{
                 provider = 'codex'; p5 = $null; r5 = $null; p7 = $null; r7 = $null
                 stale5 = $false; stale7 = $false; window5Secs = 18000.0
@@ -665,8 +689,14 @@ function Update-Display {
     # otherwise a Codex-only card would never advance its countdown.
     $v = $views[$active]
     if (-not $v -and $views['claude']) { $v = $views['claude']; $active = 'claude'; $script:activeProvider = 'claude' }
+    # ...and the mirror image. Without it a Codex-ONLY user - no terminal Claude Code, so
+    # no usage-cache.json and no Claude activity stamp, which is a setup the README now
+    # tells people to install with -AutoStart - sat on "waiting for Claude usage data..."
+    # forever with the tab COLLAPSED, unable to reach the Codex numbers already in memory.
+    if (-not $v -and $views['codex']) { $v = $views['codex']; $active = 'codex'; $script:activeProvider = 'codex' }
     if (-not $v) {
-        $Updated.Text = 'waiting for Claude usage data...'
+        # Name what is actually missing: with Codex on, this is not a Claude-only wait.
+        $Updated.Text = if ($CODEX_ON) { 'waiting for usage data...' } else { 'waiting for Claude usage data...' }
         $TabGroup.Visibility = [Windows.Visibility]::Collapsed
         return
     }
@@ -738,6 +768,11 @@ function Update-Display {
         $msg  = if ($v.lastError) { [string]$v.lastError.message } else { '' }
         if ($cls -eq 'binary-missing')  { $Updated.Text = 'Codex app-server not found' }
         elseif ($cls -eq 'spawn-failed'){ $Updated.Text = "couldn't start Codex" }
+        # 'exited' and 'no-reply' are separate from 'parse-fail' on purpose: a CLI that
+        # died on startup and one that answered with an unusable shape are different
+        # problems with different fixes, and the Mac plugin already told them apart.
+        elseif ($cls -eq 'exited')      { $Updated.Text = 'Codex quit before answering' }
+        elseif ($cls -eq 'no-reply')    { $Updated.Text = 'Codex never answered' }
         elseif ($cls -eq 'parse-fail')  { $Updated.Text = 'Codex reply had no usable limits' }
         elseif ($cls -eq 'rpc-error') {
             # -32600 is JSON-RPC's generic "invalid request" - the server returns it for
@@ -815,7 +850,27 @@ $CX_BASE_SECONDS = 180
 $CX_MIN_SPACING = 60
 $script:cxBackoff = $CX_BASE_SECONDS
 $script:cxProc = $null
-$script:cxStartedAt = $null
+# Seeded from DISK, not from $null. The floor lived only in memory, so every /moth restart
+# reset it and the 3-second first-paint poll fired immediately - and the README tells users
+# to type /moth after turning Codex on, after turning it off, and after any config edit.
+# Six /moth in a minute was six real app-server launches, six live rate-limit calls, and
+# six chances to rewrite ~/.codex/auth.json: exactly the cost this floor exists to bound.
+# The helper's own timestamps are the only record that survives the process.
+$script:cxStartedAt = $(
+    try {
+        if (Test-Path $codexCacheFile) {
+            $c = Get-Content $codexCacheFile -Raw | ConvertFrom-Json
+            $stamps = @()
+            if (Test-Numeric $c.captured_at) { $stamps += [long]$c.captured_at }
+            if ($c.last_error -and (Test-Numeric $c.last_error.at)) { $stamps += [long]$c.last_error.at }
+            # A stamp from the future (clock step, hand edit) must not floor us forever.
+            $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+            $ok = @($stamps | Where-Object { $_ -le $now })
+            if ($ok.Count) { ($ok | Measure-Object -Maximum).Maximum } else { $null }
+        } else { $null }
+    } catch { $null }
+)
+$script:cxFirstStartedAt = $null
 $script:cxLastActivity = $null
 $script:cxWanted = $false
 
@@ -851,6 +906,9 @@ function Invoke-CodexPoll {
         $script:cxProc = Start-Process 'powershell.exe' -PassThru -WindowStyle Hidden -ArgumentList @(
             '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $codexHelper + '"'))
         $script:cxStartedAt = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        # Latched once: this is what the pending/spawn-failed classification measures, and
+        # it must only ever move forward.
+        if ($null -eq $script:cxFirstStartedAt) { $script:cxFirstStartedAt = $script:cxStartedAt }
         # Success resets the interval, not just the variable - restoring only the variable
         # once pinned polling at the backoff ceiling forever (the live_sync bug).
         $script:cxBackoff = $CX_BASE_SECONDS

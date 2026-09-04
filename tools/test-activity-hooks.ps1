@@ -200,6 +200,35 @@ $soloCfg = [IO.File]::ReadAllText($solo) | ConvertFrom-Json
 Check 'emptied event removed'      ($soloCfg.hooks.PSObject.Properties.Name -contains 'UserPromptSubmit') 'False'
 Check 'unrelated keys survive'     $soloCfg.statusLine.command 'x'
 
+Write-Host "`n-- installer: a refused uninstall must not strand the hooks --"
+# The race the script's own header warns about: settings.json is fine at the step-0
+# validation and broken by the time of the late re-read (Claude Code hot-reloads and
+# rewrites this file). The execution copy used to be deleted BEFORE that read, so a
+# refusal left the hook entries registered and pointing at a file that no longer existed -
+# a missing command on every prompt, under a message that said "nothing was changed".
+$raceDir  = Join-Path $fakeLocal 'MothRace'
+$raceJson = Join-Path $tmp 'race.json'
+[IO.File]::WriteAllText($raceJson, '{}', (New-Object Text.UTF8Encoding($false)))
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer -SettingsPath $raceJson -TargetDir $raceDir -Quiet
+$raceCopy = Join-Path $raceDir 'touch-activity.ps1'
+Check 'race: install put the copy in place' (Test-Path -LiteralPath $raceCopy) 'True'
+
+# Break the file the way a torn concurrent write would.
+[IO.File]::WriteAllText($raceJson, '{ "hooks": { "Stop": [ }', (New-Object Text.UTF8Encoding($false)))
+$raceBefore = [IO.File]::ReadAllBytes($raceJson)
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer -SettingsPath $raceJson -TargetDir $raceDir -Uninstall -Quiet 2>$null
+Check 'race: uninstall refuses'             ($LASTEXITCODE -ne 0) 'True'
+Check 'race: settings.json byte-identical'  ([Convert]::ToBase64String([IO.File]::ReadAllBytes($raceJson))) ([Convert]::ToBase64String($raceBefore))
+# The point of the fix: the hooks still reference the copy, so the copy must still exist.
+Check 'race: the execution copy SURVIVES'   (Test-Path -LiteralPath $raceCopy) 'True'
+
+# And on the happy path it is still removed - deferring the delete must not skip it.
+[IO.File]::WriteAllText($raceJson, '{}', (New-Object Text.UTF8Encoding($false)))
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer -SettingsPath $raceJson -TargetDir $raceDir -Quiet
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer -SettingsPath $raceJson -TargetDir $raceDir -Uninstall -Quiet
+Check 'clean uninstall removes the copy'    (Test-Path -LiteralPath $raceCopy) 'False'
+Check 'clean uninstall exit 0'              $LASTEXITCODE 0
+
 Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host ("`n{0} passed, {1} failed" -f $script:pass, $script:fail)
 if ($script:fail) { exit 1 }

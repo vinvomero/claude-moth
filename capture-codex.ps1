@@ -17,7 +17,8 @@
 #
 # Exit codes (the widget reads `last_error.class` from the cache, not these, but they
 # make a hand-run legible):
-#   0 ok | 2 timeout | 3 rpc-error | 4 parse-fail | 5 binary-missing | 6 already-running
+#   0 ok | 2 timeout | 3 rpc-error | 4 parse-fail/no-reply | 5 binary-missing/spawn-failed
+#   6 already-running | 7 exited (the CLI died before answering)
 
 param(
     # Test hook: point at a stand-in executable. Overrides every discovery step below.
@@ -256,7 +257,13 @@ function Set-LastError($class, $message, $code) {
     # telling either of those users to sign in would send them somewhere useless.
     $obj.last_error = [ordered]@{
         class = $class
-        code = $(if ($null -ne $code) { [int]$code } else { $null })
+        # -as [int], never [int]. The code comes straight out of the app-server's JSON with
+        # no shape check, and a hard cast on a string code ("auth_required") or one past
+        # Int32 raises a TERMINATING error that SilentlyContinue does not suppress - it
+        # would escape this function and both try blocks and end the run having written
+        # nothing, so the widget would blame the spawn for a server that answered. -as
+        # yields $null instead, and the read side already guards with Test-Numeric.
+        code = $(if ($null -ne $code) { $code -as [int] } else { $null })
         message = $trimmed
         at = [long][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     }
@@ -291,7 +298,7 @@ try {
 
     $exe = Find-CodexExe $override $ConfigPath $BinRoot
     if (-not $exe) {
-        Set-LastError 'binary-missing' 'codex.exe not found (override, CODEX_CLI_PATH, and bin glob all failed)'
+        Set-LastError 'binary-missing' 'codex.exe not found (override, CODEX_CLI_PATH, PATH, and bin glob all failed)'
         exit 5
     }
 
@@ -372,18 +379,38 @@ try {
             }
             $line = $task.Result
             if ($null -eq $line) {
-                Set-LastError 'parse-fail' 'app-server closed stdout before answering'
+                # stdout closing does not mean the process is reaped yet, so a bare
+                # HasExited check races. Wait for the real status: a codex that DIED on
+                # startup (bad config, blocked by AV) is a broken install, and calling that
+                # "no usable limits" sends the user to look at their plan instead.
+                $rc = $null
+                try { if ($proc.WaitForExit(2000)) { $rc = $proc.ExitCode } } catch { }
+                if ($null -ne $rc -and $rc -ne 0) {
+                    Set-LastError 'exited' ("codex exited with status {0} before answering" -f $rc)
+                    exit 7
+                }
+                Set-LastError 'no-reply' 'app-server closed its output before answering'
                 exit 4
             }
-            $lines++
             $bytes += $line.Length
-            if ($lines -gt 200 -or $bytes -gt 1048576) {
-                Set-LastError 'parse-fail' 'app-server produced too much output before answering'
+            if ($bytes -gt 1048576) {
+                Set-LastError 'no-reply' 'app-server sent too much before answering'
                 exit 4
             }
 
             $msg = $null
-            try { $msg = $line | ConvertFrom-Json } catch { continue }
+            try { $msg = $line | ConvertFrom-Json } catch { }
+            # The line cap counts only what is NOT a well-formed notification, matching the
+            # Mac plugin: a build that starts the user's MCP servers emits a burst of them
+            # before answering, and counting those would pin that user at a permanent
+            # failure with no knob to raise. The deadline and byte cap are the real bounds.
+            if (-not ($msg -and $null -eq $msg.id -and $msg.method)) {
+                $lines++
+                if ($lines -gt 200) {
+                    Set-LastError 'no-reply' 'app-server sent too much before answering'
+                    exit 4
+                }
+            }
             if ($null -eq $msg) { continue }
             # Replies can arrive out of order and unsolicited notifications carry no id,
             # so match on the id we asked for rather than on position.
@@ -408,14 +435,20 @@ try {
         }
 
         $parsed.captured_at = [long][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        # Read BEFORE the write. This used to read after Publish-Cache had already replaced
+        # the file, so it always found the success snapshot it had just written and the
+        # 'recovered' line could never fire - leaving widget-error.log showing every Codex
+        # failure and never showing one clear.
+        $prevErr = $null
+        $prev = Read-PreviousCache $cacheFile
+        if ($prev -and $prev.last_error) { $prevErr = $prev.last_error }
+
         if (-not (Publish-Cache $cacheFile $parsed)) {
             Set-LastError 'parse-fail' 'could not write codex-cache.json'
             exit 4
         }
-
         # Success clears the sticky error so the widget stops showing a stale hint.
-        $prev = Read-PreviousCache $cacheFile
-        if ($prev -and $prev.last_error) { Write-ErrorLog 'codex: recovered' }
+        if ($prevErr) { Write-ErrorLog 'codex: recovered' }
         exit 0
     }
     finally {

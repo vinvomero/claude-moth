@@ -102,12 +102,14 @@ try {
 } catch { }
 
 # --- 1. Install or remove the execution copy -------------------------------------
-if ($Uninstall) {
-    if (Test-Path -LiteralPath $target) {
-        Remove-Item -LiteralPath $target -Force
-        Say "  [ok] removed $target" 'Green'
-    }
-} else {
+# UNINSTALL DELETES NOTHING YET. The header above promises the hooks can never end up
+# pointing at a script that no longer exists, but only the step-0 validation runs before
+# this point - the LATE re-read at step 2 can still fail (Claude Code holds the file open
+# mid-hot-reload, or a torn read fails to parse). Deleting here and then throwing left the
+# copy gone, both hook entries registered, and a message that said "nothing was changed".
+# Every prompt in every session then launched powershell.exe against a missing path.
+# The removal now happens at step 5, once the hooks that point at it are provably gone.
+if (-not $Uninstall) {
     if (-not (Test-Path -LiteralPath $source)) { throw "source not found: $source" }
     if (-not (Test-Path -LiteralPath $TargetDir)) {
         New-Item -ItemType Directory -Path $TargetDir -Force | Out-Null
@@ -127,10 +129,21 @@ if (-not $Uninstall -and -not (Test-Path -LiteralPath $backup)) {
 # Both Claude Code and this script write settings.json; re-read immediately before the
 # merge so a change made since the step-0 validation is not clobbered.
 $cfg = $null
-$rawLate = [System.IO.File]::ReadAllText($SettingsPath)
+# The READ is guarded too, not just the parse: Claude Code rewriting the file at this
+# instant raises an IOException here, and an unguarded one would surface as a raw .NET
+# stack trace in the middle of an uninstall instead of this script's own message.
+$rawLate = $null
+try { $rawLate = [System.IO.File]::ReadAllText($SettingsPath) }
+catch { throw "settings.json could not be read while this script was running (a Claude Code session may have it open) - nothing was changed. $_" }
 if ($rawLate.Trim().Length -gt 0) {
     try { $cfg = $rawLate | ConvertFrom-Json }
     catch { throw "settings.json became unparseable while this script was running - nothing was changed. $_" }
+}
+# Shape-check the LATE read as well. The step-0 check validated a file that may since have
+# been replaced; merging into a shape Claude Code will not accept, and only catching it
+# after the write, would mean discovering the problem with the file already rewritten.
+if (-not (Test-HooksShape $cfg)) {
+    throw "settings.json hooks became malformed while this script was running - nothing was changed."
 }
 if ($null -eq $cfg) { $cfg = [pscustomobject]@{} }
 if (-not ($cfg.PSObject.Properties.Name -contains 'hooks') -or -not $cfg.hooks) {
@@ -183,22 +196,41 @@ foreach ($evt in $EVENTS) {
 # An uninstall that removed nothing must not rewrite (and reformat) the file of a user
 # who never installed the hooks. uninstall.ps1 calls this for everyone.
 if ($added -eq 0 -and $removed -eq 0) {
-    if ($Uninstall) { Say "  [ok] no activity hooks were installed; settings.json untouched" 'Green' }
+    if ($Uninstall) {
+        Say "  [ok] no activity hooks were installed; settings.json untouched" 'Green'
+        # Nothing pointed at the copy, so removing it strands nothing.
+        if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Force; Say "  [ok] removed $target" 'Green' }
+    }
     if ($foreign) { Say "  [!!] $foreign entr(ies) point at touch-activity.ps1 with a different -Provider - inspect them" 'Yellow' }
     return
 }
+
+# No backup is taken on the uninstall path (step 2), so "restore from $backup" would send
+# a user to a file that does not exist at the exact moment their settings.json has just
+# been rewritten and they most need a real recovery route.
+$restoreHint = if (Test-Path -LiteralPath $backup) { "restore from $backup" }
+               else { "restore settings.json from your own backup" }
 
 Write-Utf8NoBom $SettingsPath ($cfg | ConvertTo-Json -Depth 100)
 
 $bytes = [System.IO.File]::ReadAllBytes($SettingsPath)
 if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
-    throw "settings.json was written with a BOM - restore from $backup"
+    throw "settings.json was written with a BOM - $restoreHint"
 }
 $written = $null
 try { $written = [System.IO.File]::ReadAllText($SettingsPath) | ConvertFrom-Json }
-catch { throw "settings.json became invalid JSON - restore from $backup. $_" }
+catch { throw "settings.json became invalid JSON - $restoreHint. $_" }
 if (-not (Test-HooksShape $written)) {
-    throw "settings.json hooks are malformed (an event is not an array) - restore from $backup"
+    throw "settings.json hooks are malformed (an event is not an array) - $restoreHint"
+}
+
+# --- 5. NOW remove the execution copy -------------------------------------------
+# Only here: the hook entries that referenced it are gone from a settings.json that has
+# been written AND validated, so there is no window in which a registered hook points at
+# a deleted file.
+if ($Uninstall -and (Test-Path -LiteralPath $target)) {
+    Remove-Item -LiteralPath $target -Force
+    Say "  [ok] removed $target" 'Green'
 }
 
 if ($Uninstall) { Say "  [ok] removed $removed hook entr(ies); settings.json valid" 'Green' }
