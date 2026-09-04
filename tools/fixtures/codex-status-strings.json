@@ -1,0 +1,17 @@
+{
+  "_comment": "One source of truth for what each Codex failure is CALLED, so the two platforms cannot drift into telling the same user two different stories. 'windows' is the widget's one-line status text (widget.ps1); 'mac' is the menu row (mac/moth.5m.sh). They differ in length because one is a status line and the other is a menu row - they must never differ in meaning. Both test suites assert against this file.",
+
+  "binary-missing":      { "windows": "Codex app-server not found",        "mac": "Codex CLI not found." },
+  "spawn-failed":        { "windows": "couldn't start Codex",              "mac": "Couldn't start the Codex CLI." },
+  "interpreter-missing": { "windows": null,                                "mac": "Found the Codex CLI, but not the interpreter it needs (install Node, or use the app's own build)." },
+  "quarantine":          { "windows": null,                                "mac": "macOS blocked it. Run it once from a terminal, or clear quarantine: xattr -d com.apple.quarantine <path>" },
+  "parse-fail":          { "windows": "Codex reply had no usable limits",  "mac": "Codex replied, but with no usable limits." },
+  "timeout":             { "windows": "codex: poll timed out",             "mac": "Codex didn't answer in time." },
+  "exited":              { "windows": "couldn't start Codex",              "mac": "The Codex CLI exited before answering." },
+  "rpc-auth":            { "windows": "sign in to Codex to sync",          "mac": "Sign in to Codex to sync." },
+  "rpc-too-old":         { "windows": "Codex too old for rateLimits/read", "mac": "This Codex build is too old to report rate limits." },
+  "rpc-backend":         { "windows": "Codex sync failed",                 "mac": "Codex sync failed." },
+  "rpc-overloaded":      { "windows": "Codex overloaded, retrying",        "mac": "Codex is overloaded - try again shortly." },
+  "rpc-other":           { "windows": "Codex error {0}",                   "mac": "Codex error {0}." },
+  "no-weekly":           { "windows": "--%",                               "mac": "--%" }
+}
