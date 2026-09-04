@@ -115,6 +115,17 @@ function Find-CodexExe($override, $configPath, $binRoot) {
             }
         } catch { }
     }
+    # An npm install (`npm i -g @openai/codex`) has no desktop hash folder and no
+    # CODEX_CLI_PATH, so PATH is the only way to find it. npm writes codex, codex.cmd AND
+    # codex.ps1 side by side and PowerShell resolves the .ps1 FIRST - but Process.Start
+    # with UseShellExecute=$false rejects a .ps1 outright ("not a valid application for
+    # this OS platform"). So: take the first .exe, else the first .cmd, never the .ps1.
+    try {
+        $onPath = @(Get-Command 'codex' -CommandType Application -All -ErrorAction SilentlyContinue)
+        $pick = @($onPath | Where-Object { $_.Source -match '\.exe$' }) | Select-Object -First 1
+        if (-not $pick) { $pick = @($onPath | Where-Object { $_.Source -match '\.cmd$' }) | Select-Object -First 1 }
+        if ($pick) { return $pick.Source }
+    } catch { }
     if ($binRoot -and (Test-Path -LiteralPath $binRoot)) {
         try {
             $hit = @(Get-ChildItem -LiteralPath $binRoot -Filter 'codex.exe' -Recurse -File -ErrorAction SilentlyContinue |
@@ -123,6 +134,20 @@ function Find-CodexExe($override, $configPath, $binRoot) {
         } catch { }
     }
     return $null
+}
+
+# .NET Framework has no process-tree kill, and an npm .cmd shim runs as
+# cmd.exe -> node -> codex.exe: killing the top process would leave a wedged app-server
+# holding a dead pipe. taskkill /T is the same idiom the widget's anomaly path uses.
+function Stop-ProcessTree($proc) {
+    if (-not $proc) { return }
+    try {
+        if (-not $proc.HasExited) {
+            Start-Process 'taskkill.exe' -ArgumentList '/PID', $proc.Id, '/T', '/F' `
+                -WindowStyle Hidden -Wait -ErrorAction SilentlyContinue
+        }
+    } catch { }
+    try { if (-not $proc.HasExited) { $proc.Kill() } } catch { }
 }
 
 # --- parsing ----------------------------------------------------------------------
@@ -267,7 +292,12 @@ try {
 
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName               = $exe
-    $psi.Arguments              = 'app-server'
+    # -s read-only -a never: the app-server never starts a thread for a rate-limit read,
+    # so these are belt-and-braces, but they cost nothing and say plainly that this
+    # process may not write or approve anything. --stdio is the documented default
+    # transport, stated rather than assumed. All three verified accepted on codex-cli
+    # 0.152.0; the Mac plugin uses the identical argument list.
+    $psi.Arguments              = '-s read-only -a never app-server --stdio'
     $psi.UseShellExecute        = $false
     $psi.RedirectStandardInput  = $true
     $psi.RedirectStandardOutput = $true
@@ -385,7 +415,7 @@ try {
             try { $proc.StandardInput.Close() } catch { }
             try {
                 if (-not $proc.WaitForExit(2000)) {
-                    if (-not $proc.HasExited) { try { $proc.Kill() } catch { } }
+                    Stop-ProcessTree $proc
                     $proc.WaitForExit(2000) | Out-Null
                 }
             } catch { }

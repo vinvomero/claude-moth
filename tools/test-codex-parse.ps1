@@ -118,6 +118,26 @@ Check 'config path beats glob'   (Find-CodexExe $null $cfgGood $binRoot)   $exeA
 Check 'dead config -> glob'      (Find-CodexExe $null $cfgDead $binRoot)   $exeB
 Check 'no config -> glob'        (Find-CodexExe $null (Join-Path $tmp 'absent.toml') $binRoot) $exeB
 Check 'nothing anywhere -> null' (Find-CodexExe $null (Join-Path $tmp 'absent.toml') (Join-Path $tmp 'empty')) $null
+
+# npm installs put codex.ps1 next to codex.cmd and PowerShell resolves the .ps1 first,
+# but Process.Start(UseShellExecute=$false) cannot launch a .ps1 - so discovery must
+# never hand one back. PATH is the only input here, so it is set for these cases only.
+$pathDir = Join-Path $tmp 'npmbin'
+New-Item -ItemType Directory -Path $pathDir -Force | Out-Null
+$shimPs1 = Join-Path $pathDir 'codex.ps1'; $shimCmd = Join-Path $pathDir 'codex.cmd'
+Set-Content -LiteralPath $shimPs1 -Value '# npm shim'
+Set-Content -LiteralPath $shimCmd -Value '@echo off'
+$savedPath = $env:PATH
+try {
+    $env:PATH = $pathDir
+    $noGlob = Join-Path $tmp 'empty'
+    Check 'PATH: .cmd beats .ps1'  (Find-CodexExe $null (Join-Path $tmp 'absent.toml') $noGlob) $shimCmd
+    Check 'config still beats PATH' (Find-CodexExe $null $cfgGood $noGlob)                      $exeA
+    Check 'override still beats PATH' (Find-CodexExe $exeB $cfgGood $noGlob)                    $exeB
+    # A real .exe on PATH is preferred over the shim pair.
+    $shimExe = Join-Path $pathDir 'codex.exe'; Set-Content -LiteralPath $shimExe -Value 'stub'
+    Check 'PATH: .exe beats .cmd'  (Find-CodexExe $null (Join-Path $tmp 'absent.toml') $noGlob) $shimExe
+} finally { $env:PATH = $savedPath }
 Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
 
 Write-Host ("`n{0} passed, {1} failed" -f $script:pass, $script:fail)
