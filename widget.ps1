@@ -1,4 +1,4 @@
-param([string]$SelfTest, [string]$Screenshot, [string]$CodexFixture, [string]$Provider)
+param([string]$SelfTest, [string]$Screenshot, [string]$CodexFixture, [string]$Provider, [string]$StatePath)
 # widget.ps1
 # Frameless, always-on-top desktop widget that shows real Claude Code usage
 # (5-hour + weekly) read from usage-cache.json. Native WPF via Windows PowerShell 5.1.
@@ -8,7 +8,12 @@ param([string]$SelfTest, [string]$Screenshot, [string]$CodexFixture, [string]$Pr
 #                                    state) and print a one-line state dump
 #   -Screenshot <out.png>            render the card to a PNG (uses the live cache)
 #   -CodexFixture <cache.json>       supply a Codex snapshot without polling Codex
+#                                    ('empty' = no Codex snapshot, and do NOT fall back
+#                                    to the live cache)
 #   -Provider claude|codex           force which provider the dev render paints
+#   -StatePath <state.json>          read/write window state here instead of the real
+#                                    window-state.json, so a demo render can set its own
+#                                    flags without touching the author's settings
 # Dev flags never start the timers (those live in SourceInitialized), so a headless
 # run can never spawn the Codex helper.
 
@@ -18,7 +23,10 @@ Add-Type -AssemblyName System.Windows.Forms   # Cursor::Position (absolute scree
 $root      = $PSScriptRoot
 $cacheFile = Join-Path $root 'usage-cache.json'
 $cfgFile   = Join-Path $root 'config.json'
-$stateFile = Join-Path $root 'window-state.json'   # per-user runtime state (gitignored)
+# Per-user runtime state (gitignored). -StatePath redirects every read AND write of it,
+# so a demo render can hand itself a throwaway state file instead of borrowing - and
+# rewriting - the author's real one.
+$stateFile = if ($StatePath) { $StatePath } else { Join-Path $root 'window-state.json' }
 $logFile   = Join-Path $root 'widget-error.log'
 $hiddenFlag = Join-Path $root 'widget-hidden.flag' # written when the user clicks x, so
                                                    # mid-session relaunch respects the close;
@@ -1158,7 +1166,11 @@ if ($SelfTest -or $Screenshot) {
     # Codex side: an explicit fixture, else the live Codex cache for -Screenshot. Loaded
     # raw the same way the Claude cache is, so a fixture can exercise shapes Read-CodexCache
     # would reject.
-    if ($CodexFixture -and $CodexFixture -ne 'empty') { $script:codexCache = (Get-Content $CodexFixture -Raw | ConvertFrom-Json) }
+    # 'empty' is an ANSWER, not a missing argument: it means "render with no Codex
+    # snapshot" and must not fall through to the live cache, or a hero frame rendered on
+    # the author's machine would quietly carry the author's real Codex percentages.
+    if ($CodexFixture -eq 'empty') { }
+    elseif ($CodexFixture) { $script:codexCache = (Get-Content $CodexFixture -Raw | ConvertFrom-Json) }
     elseif ($Screenshot -and (Test-Path $codexCacheFile)) { $script:codexCache = (Get-Content $codexCacheFile -Raw | ConvertFrom-Json) }
     if ($Provider) { $script:forcedProvider = $Provider }
     # The window is never shown here, so nothing lays it out. Detach the content and force a
